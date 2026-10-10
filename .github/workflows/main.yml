@@ -35,7 +35,7 @@ jobs:
           version: "1.259.0"
 
       - name: Format
-        run: zig fmt --check build.zig src tools example
+        run: zig fmt --check build.zig src tools examples tests
 
       - name: Test
         run: zig build test --summary all
@@ -49,14 +49,14 @@ jobs:
       - name: Compile every binding
         run: zig build check
 
-      - name: Build example
+      - name: Build examples
         run: |
           set -eux
           zig build
-          wasm-tools validate zig-out/pumpkin-plugin-example.wasm
+          for plugin in zig-out/*.wasm; do wasm-tools validate "$plugin"; done
 
-      - name: Upload example
+      - name: Upload examples
         uses: actions/upload-artifact@v7
         with:
-          name: pumpkin-plugin-example
-          path: zig-out/pumpkin-plugin-example.wasm
+          name: example-plugins
+          path: zig-out/*.wasm

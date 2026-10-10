@@ -122,7 +122,19 @@ comptime {
 }
 ```
 
-For a complete plugin that uses typed commands, a menu and a config file, see [`example/src/main.zig`](example/src/main.zig).
+[`examples/`](examples) has a small plugin for each part of the API, and `zig build` builds them all into `zig-out/`:
+
+| Example | Shows |
+| --- | --- |
+| [`hello`](examples/hello.zig) | Events, a command and styled text |
+| [`heal`](examples/heal.zig) | Command arguments read with `cmd.typed` |
+| [`menu`](examples/menu.zig) | An inventory menu with buttons |
+| [`config`](examples/config.zig) | A JSON config file in the plugin's data folder |
+| [`dns`](examples/dns.zig) | Looking up the addresses of a host name |
+| [`http`](examples/http.zig) | A TCP connection with a timeout and a plain HTTP request |
+| [`https`](examples/https.zig) | HTTPS with `std.http.Client` |
+| [`tcp-server`](examples/tcp-server.zig) | A TCP server that bridges the chat, polled from a task |
+| [`udp`](examples/udp.zig) | Receiving and answering UDP datagrams |
 
 ## Commands
 
