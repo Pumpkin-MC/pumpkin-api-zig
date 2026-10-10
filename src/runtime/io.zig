@@ -1,5 +1,6 @@
-//! The `std.Io` behind `pumpkin.io()`. Files go through Zig's own WASI support,
-//! networking is built on wasi:sockets, which Zig's `std.Io` lacks on WASI.
+//! The `std.Io` behind `pumpkin.io()`. File access uses Zig's own WASI
+//! support. Networking is built on wasi:sockets, because Zig's `std.Io` has
+//! none on WASI.
 
 const std = @import("std");
 const abi = @import("abi.zig");
@@ -16,9 +17,9 @@ const Pollable = wasi.poll.Pollable;
 const Accepted = struct { socket: tcp.TcpSocket, input: streams.InputStream, output: streams.OutputStream };
 const Datagram = struct { from: net.IpAddress, data: []u8 };
 
-/// `pending` holds what `ready` took in to find out whether anything is
-/// there. A pollable stays ready until a read comes up empty, so asking it
-/// alone would make the next read wait.
+/// `pending` holds what `ready` already took off the socket while checking for
+/// data. A pollable keeps reporting ready until a read comes back empty, so
+/// trusting the pollable alone would make the next read block.
 const Entry = union(enum) {
     stream: struct {
         socket: tcp.TcpSocket,
@@ -26,6 +27,7 @@ const Entry = union(enum) {
         output: streams.OutputStream,
         pending: std.ArrayList(u8) = .empty,
         ended: bool = false,
+        failed: bool = false,
     },
     listener: struct { socket: tcp.TcpSocket, pending: std.ArrayList(Accepted) = .empty },
     datagram: struct {
@@ -36,7 +38,7 @@ const Entry = union(enum) {
     },
 };
 
-/// Socket handles start here so they can't be mistaken for WASI file descriptors.
+/// Socket handles start here so they can't be confused with WASI file descriptors.
 const first_handle = 1 << 20;
 
 var entries: std.ArrayList(?Entry) = .empty;
@@ -69,19 +71,20 @@ fn install(vtable: *Io.VTable) void {
     vtable.netLookup = lookup;
 }
 
-/// Whether `handle` has something waiting: a connection for a server, data
-/// for a stream or a datagram for a UDP socket. Polling this from a task lets
-/// a plugin accept and receive without blocking the server.
+/// Reports whether `handle` has something waiting: a connection on a server
+/// socket, data on a stream or a datagram on a UDP socket. Checking it from a
+/// task lets a plugin accept and receive without ever blocking the server.
 pub fn ready(handle: net.Socket.Handle) bool {
     return switch (get(handle) orelse return false) {
-        .stream => |st| st.pending.items.len > 0 or st.ended or takeBytes(handle, st.input),
+        .stream => |st| st.pending.items.len > 0 or st.ended or st.failed or takeBytes(handle, st.input),
         .listener => |l| l.pending.items.len > 0 or takeConnection(handle, l.socket),
         .datagram => |d| d.pending.items.len > 0 or takeDatagrams(handle, d.incoming),
     };
 }
 
-// The take functions look the entry up again after calling the host, which
-// may run another callback of the plugin that adds sockets and moves entries.
+// The take functions look the entry up again after calling the host, because
+// the host may run another plugin callback in between that opens sockets and
+// moves the entries.
 
 fn takeBytes(handle: net.Socket.Handle, input: streams.InputStream) bool {
     const result = input.read(64 * 1024);
@@ -91,12 +94,59 @@ fn takeBytes(handle: net.Socket.Handle, input: streams.InputStream) bool {
             if (bytes.len == 0) return false;
             st.pending.appendSlice(abi.heap, bytes) catch @panic("OOM");
         },
-        .err => |err| {
-            if (err == .last_operation_failed) err.last_operation_failed.deinit();
-            st.ended = true;
+        .err => |err| switch (err) {
+            .closed => st.ended = true,
+            .last_operation_failed => |e| {
+                e.deinit();
+                st.failed = true;
+            },
         },
     }
     return true;
+}
+
+/// Waits until `handle` has something waiting. Returns false if `timeout`
+/// runs out first.
+pub fn waitReady(handle: net.Socket.Handle, timeout: Io.Timeout) bool {
+    const deadline: Io.Timeout = timeout.toDeadline(current());
+    while (true) {
+        if (ready(handle)) return true;
+        const pollable = switch (get(handle) orelse return false) {
+            .stream => |st| st.input.subscribe(),
+            .listener => |l| l.socket.subscribe(),
+            .datagram => |d| d.incoming.subscribe(),
+        };
+        if (!waitTimeout(pollable, deadline)) return ready(handle);
+    }
+}
+
+/// Writes as much of `bytes` as the stream accepts without blocking and
+/// returns how many bytes that was.
+pub fn writeNow(handle: net.Socket.Handle, bytes: []const u8) error{ ConnectionResetByPeer, SocketUnconnected }!usize {
+    const output = switch (get(handle) orelse return error.SocketUnconnected) {
+        .stream => |st| st.output,
+        else => return error.SocketUnconnected,
+    };
+    const permitted = switch (output.checkWrite()) {
+        .ok => |permitted| permitted,
+        .err => |err| return streamError(err),
+    };
+    const n: usize = @intCast(@min(permitted, bytes.len));
+    if (n == 0) return 0;
+    switch (output.write(bytes[0..n])) {
+        .ok => {},
+        .err => |err| return streamError(err),
+    }
+    switch (output.flush()) {
+        .ok => {},
+        .err => |err| return streamError(err),
+    }
+    return n;
+}
+
+fn streamError(err: streams.StreamError) error{ConnectionResetByPeer} {
+    if (err == .last_operation_failed) err.last_operation_failed.deinit();
+    return error.ConnectionResetByPeer;
 }
 
 fn takeConnection(handle: net.Socket.Handle, socket: tcp.TcpSocket) bool {
@@ -138,7 +188,7 @@ fn wait(pollable: Pollable) void {
     pollable.deinit();
 }
 
-/// Waits for `pollable` until `timeout` runs out, false if it did.
+/// Waits for `pollable` until `timeout` runs out. Returns false on timeout.
 fn waitTimeout(pollable: Pollable, timeout: Io.Timeout) bool {
     defer pollable.deinit();
     const deadline = timeout.toTimestamp(current()) orelse {
@@ -499,6 +549,7 @@ fn read(_: ?*anyopaque, handle: net.Socket.Handle, data: [][]u8) net.Stream.Read
         stream.pending.replaceRangeAssumeCapacity(0, n, &.{});
         return n;
     }
+    if (stream.failed) return error.ConnectionResetByPeer;
     if (stream.ended) return 0;
 
     const bytes = switch (stream.input.blockingRead(len)) {
@@ -536,7 +587,7 @@ fn write(_: ?*anyopaque, handle: net.Socket.Handle, header: []const u8, data: []
         else => return error.SocketUnconnected,
     };
 
-    // blocking-write-and-flush takes at most 4096 bytes at a time.
+    // `blocking-write-and-flush` accepts at most 4096 bytes per call.
     var buffer: [4096]u8 = undefined;
     var len = fill(&buffer, 0, header);
     for (data[0 .. data.len - 1]) |bytes| len = fill(&buffer, len, bytes);
@@ -640,7 +691,7 @@ fn lookup(
     };
     defer stream.deinit();
 
-    // Queues of 16 have to be enough, and the canonical name takes one place.
+    // Callers only guarantee room for 16 results, and the canonical name takes one.
     var found: usize = 0;
     while (found < 15) {
         const address = switch (stream.resolveNextAddress()) {

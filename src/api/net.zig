@@ -1,5 +1,6 @@
-//! TCP and UDP with callbacks, polled once per tick so they never block the
-//! game. Everything still open is closed when the plugin unloads.
+//! TCP and UDP sockets driven by callbacks. All sockets are polled once per
+//! tick, so callbacks run only when something has arrived and never block the
+//! game. Sockets still open when the plugin unloads are closed automatically.
 //!
 //!     _ = try pumpkin.net.listen(.{ .port = 25580, .callbacks = .{ .on_line = onLine } });
 
@@ -13,20 +14,28 @@ const net = std.Io.net;
 
 pub const Address = net.IpAddress;
 
-/// Whether a raw `std.Io.net` socket has a connection, data or a datagram waiting.
+/// Reports whether a raw `std.Io.net` socket has a connection, data or a
+/// datagram waiting, without blocking.
 pub const ready = runtime_io.ready;
 
+/// The default number of bytes a connection may have queued before it is
+/// closed for reading too slowly.
+pub const default_max_outgoing = 1024 * 1024;
+
 pub const Framing = enum {
-    /// Callbacks get one line at a time, without the line ending.
+    /// Callbacks receive one line at a time, without the line ending.
     lines,
-    /// Callbacks get whatever arrived.
+    /// Callbacks receive the bytes in the chunks they arrive in.
     raw,
 };
 
+/// The slices passed to these callbacks are valid only until the callback returns.
 pub const Callbacks = struct {
     framing: Framing = .lines,
     on_line: ?*const fn (*Connection, []const u8) void = null,
     on_data: ?*const fn (*Connection, []const u8) void = null,
+    /// Runs when the connection closes, from either side. The connection
+    /// pointer must not be used after this returns.
     on_close: ?*const fn (*Connection) void = null,
 
     fn any(c: Callbacks) bool {
@@ -38,71 +47,152 @@ pub const Connection = struct {
     stream: net.Stream,
     reader: net.Stream.Reader,
     callbacks: Callbacks,
-    server: ?*Listener,
+    /// Polled connections queue outgoing data instead of waiting for the
+    /// other end to read it.
+    polled: bool,
+    read_timeout_ms: u32,
+    max_outgoing: usize,
     /// Free for the plugin to use, for example to tell connections apart.
     data: usize = 0,
     closed: bool = false,
+    outgoing: std.ArrayList(u8) = .empty,
     buffer: [4096]u8,
 
     pub fn address(conn: *const Connection) Address {
         return conn.stream.socket.address;
     }
 
+    /// Sends `bytes`. On a polled connection this never blocks: data the other
+    /// end isn't ready for yet is sent on later ticks, and the connection is
+    /// closed once more than `max_outgoing` bytes are waiting.
     pub fn send(conn: *Connection, bytes: []const u8) !void {
         if (conn.closed) return error.Closed;
-        var writer = conn.stream.writer(runtime_io.current(), &.{});
-        writer.interface.writeAll(bytes) catch return writer.err orelse error.WriteFailed;
+        if (!conn.polled) {
+            var writer = conn.stream.writer(runtime_io.current(), &.{});
+            writer.interface.writeAll(bytes) catch return writer.err orelse error.WriteFailed;
+            return;
+        }
+        if (conn.outgoing.items.len + bytes.len > conn.max_outgoing) {
+            conn.close();
+            return error.TooSlow;
+        }
+        conn.outgoing.appendSlice(abi.heap, bytes) catch @panic("OOM");
+        if (!conn.flush()) {
+            conn.close();
+            return error.ConnectionResetByPeer;
+        }
     }
 
     pub fn print(conn: *Connection, comptime format: []const u8, args: anytype) !void {
         try conn.send(try std.fmt.allocPrint(abi.arena(), format, args));
     }
 
-    /// Waits for the next line. For connections without callbacks, since the
-    /// others get their lines handed to them.
+    /// Waits up to `read_timeout_ms` for the next line and returns it without
+    /// the line ending. Use it on connections without callbacks; connections
+    /// with callbacks receive their lines through `on_line`.
     pub fn readLine(conn: *Connection) ![]const u8 {
         if (conn.closed) return error.Closed;
-        const line = (try conn.reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
+        const reader = &conn.reader.interface;
+        const timeout: std.Io.Timeout = (std.Io.Timeout{ .duration = .{
+            .raw = .fromMilliseconds(conn.read_timeout_ms),
+            .clock = .awake,
+        } }).toDeadline(runtime_io.current());
+        while (std.mem.indexOfScalar(u8, reader.buffered(), '\n') == null) {
+            if (reader.bufferedLen() == conn.buffer.len) return error.LineTooLong;
+            if (!runtime_io.waitReady(conn.stream.socket.handle, timeout)) return error.Timeout;
+            try reader.fillMore();
+        }
+        const line = (try reader.takeDelimiter('\n')).?;
         return abi.arena().dupe(u8, std.mem.trimEnd(u8, line, "\r"));
     }
 
-    /// Closes the connection, `on_close` runs as well.
+    /// Sends whatever queued data the stream accepts right away, closes the
+    /// connection and runs `on_close`. The pointer becomes invalid on the next tick.
     pub fn close(conn: *Connection) void {
         if (conn.closed) return;
+        _ = conn.flush();
         conn.closed = true;
         if (conn.callbacks.on_close) |on_close| on_close(conn);
+        conn.outgoing.deinit(abi.heap);
         conn.stream.close(runtime_io.current());
+    }
+
+    /// Sends as much queued data as the stream accepts without blocking.
+    /// Returns false if the stream failed.
+    fn flush(conn: *Connection) bool {
+        while (conn.outgoing.items.len > 0) {
+            const n = runtime_io.writeNow(conn.stream.socket.handle, conn.outgoing.items) catch {
+                conn.outgoing.clearRetainingCapacity();
+                return false;
+            };
+            if (n == 0) return true;
+            conn.outgoing.replaceRangeAssumeCapacity(0, n, &.{});
+        }
+        return true;
     }
 };
 
 pub const ConnectOptions = struct {
+    /// The time limit for the whole connect, across all addresses of a host name.
     timeout_ms: u32 = 10_000,
-    /// With any callback set, the connection is polled like a server's.
+    /// How long `readLine` waits for a line.
+    read_timeout_ms: u32 = 10_000,
+    /// The outgoing queue limit, used only when the connection is polled.
+    max_outgoing: usize = default_max_outgoing,
+    /// If any callback is set, the connection is polled like the connections
+    /// of a server.
     callbacks: Callbacks = .{},
 };
 
-/// Connects to `host`, a name or an IP address. Needs the "network.dns" and
-/// "network.tcp.connect" permissions.
+/// Connects to `host`, a host name or an IP address, trying its addresses in
+/// order until one accepts. Needs the "network.dns" and "network.tcp.connect"
+/// permissions.
 pub fn connect(host: []const u8, port: u16, options: ConnectOptions) !*Connection {
     const io = runtime_io.current();
-    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(options.timeout_ms), .clock = .awake } };
+    const timeout: std.Io.Timeout = (std.Io.Timeout{ .duration = .{
+        .raw = .fromMilliseconds(options.timeout_ms),
+        .clock = .awake,
+    } }).toDeadline(io);
+
     const stream = if (Address.parse(host, port)) |ip|
         try ip.connect(io, .{ .mode = .stream, .timeout = timeout })
     else |_|
-        try (try net.HostName.init(host)).connect(io, port, .{ .mode = .stream, .timeout = timeout });
+        try connectHost(try net.HostName.init(host), port, timeout);
 
-    const conn = newConnection(stream, options.callbacks, null);
+    const polled = options.callbacks.any();
+    const conn = newConnection(stream, options.callbacks, polled, options.read_timeout_ms, options.max_outgoing);
     clients.append(abi.heap, conn) catch @panic("OOM");
-    if (options.callbacks.any()) startPolling();
+    if (polled) startPolling();
     return conn;
+}
+
+/// Unlike `HostName.connect`, which tries every address before it returns,
+/// this stops at the first address that accepts the connection.
+fn connectHost(host: net.HostName, port: u16, timeout: std.Io.Timeout) !net.Stream {
+    const io = runtime_io.current();
+    var buffer: [16]net.HostName.LookupResult = undefined;
+    var results: std.Io.Queue(net.HostName.LookupResult) = .init(&buffer);
+    try host.lookup(io, &results, .{ .port = port });
+
+    var last: anyerror = error.UnknownHostName;
+    while (results.getOne(io)) |result| switch (result) {
+        .address => |address| return address.connect(io, .{ .mode = .stream, .timeout = timeout }) catch |err| {
+            if (err == error.Timeout) return err;
+            last = err;
+            continue;
+        },
+        .canonical_name => {},
+    } else |_| {}
+    return last;
 }
 
 pub const ListenOptions = struct {
     port: u16,
-    /// The address to listen on. "0.0.0.0" accepts connections from anywhere,
-    /// which the server config may forbid.
+    /// The address to listen on. "0.0.0.0" also accepts connections from other
+    /// machines, which the server config may forbid.
     host: []const u8 = "127.0.0.1",
     on_connect: ?*const fn (*Connection) void = null,
+    max_outgoing: usize = default_max_outgoing,
     callbacks: Callbacks = .{},
 };
 
@@ -116,12 +206,13 @@ pub const Listener = struct {
         return listener.server.socket.address;
     }
 
-    /// Sends `bytes` to every open connection.
+    /// Queues `bytes` for every open connection. A slow client can't block it.
     pub fn broadcast(listener: *Listener, bytes: []const u8) void {
-        for (listener.connections.items) |conn| conn.send(bytes) catch conn.close();
+        for (listener.connections.items) |conn| conn.send(bytes) catch {};
     }
 
-    /// Stops listening and closes every connection.
+    /// Stops listening and closes every connection. The pointer becomes
+    /// invalid on the next tick.
     pub fn close(listener: *Listener) void {
         if (listener.closed) return;
         listener.closed = true;
@@ -130,7 +221,8 @@ pub const Listener = struct {
     }
 };
 
-/// Accepts TCP connections on `options.port`. Needs the "network.tcp.bind" permission.
+/// Listens for TCP connections on `options.port`. Needs the "network.tcp.bind"
+/// permission.
 pub fn listen(options: ListenOptions) !*Listener {
     const address = try Address.parse(options.host, options.port);
     const listener = abi.heap.create(Listener) catch @panic("OOM");
@@ -147,6 +239,7 @@ pub fn listen(options: ListenOptions) !*Listener {
 pub const UdpOptions = struct {
     port: u16,
     host: []const u8 = "127.0.0.1",
+    /// `data` is valid only until the callback returns.
     on_datagram: ?*const fn (*Udp, Address, []const u8) void = null,
 };
 
@@ -164,6 +257,7 @@ pub const Udp = struct {
         try u.socket.send(runtime_io.current(), &to, bytes);
     }
 
+    /// Closes the socket. The pointer becomes invalid on the next tick.
     pub fn close(u: *Udp) void {
         if (u.closed) return;
         u.closed = true;
@@ -171,7 +265,7 @@ pub const Udp = struct {
     }
 };
 
-/// Binds a UDP socket to `options.port`. Needs the "network.udp" permissions.
+/// Binds a UDP socket to `options.port`. Needs the "network.udp" permission.
 pub fn udp(options: UdpOptions) !*Udp {
     const address = try Address.parse(options.host, options.port);
     const u = abi.heap.create(Udp) catch @panic("OOM");
@@ -188,9 +282,17 @@ var sockets: std.ArrayList(*Udp) = .empty;
 var task: ?u32 = null;
 var datagram_buffer: [65536]u8 = undefined;
 
-fn newConnection(stream: net.Stream, callbacks: Callbacks, server: ?*Listener) *Connection {
+fn newConnection(stream: net.Stream, callbacks: Callbacks, polled: bool, read_timeout_ms: u32, max_outgoing: usize) *Connection {
     const conn = abi.heap.create(Connection) catch @panic("OOM");
-    conn.* = .{ .stream = stream, .reader = undefined, .callbacks = callbacks, .server = server, .buffer = undefined };
+    conn.* = .{
+        .stream = stream,
+        .reader = undefined,
+        .callbacks = callbacks,
+        .polled = polled,
+        .read_timeout_ms = read_timeout_ms,
+        .max_outgoing = max_outgoing,
+        .buffer = undefined,
+    };
     conn.reader = stream.reader(runtime_io.current(), &conn.buffer);
     return conn;
 }
@@ -203,15 +305,15 @@ fn pollTask(_: Server) void {
     poll();
 }
 
-/// Handles everything that is waiting. Runs every tick by itself, call it to
-/// get things handled right away.
+/// Handles everything that is waiting. It runs every tick on its own; call it
+/// directly to handle things right away.
 pub fn poll() void {
     var i: usize = 0;
     while (i < listeners.items.len) : (i += 1) {
         const listener = listeners.items[i];
         while (!listener.closed and ready(listener.server.socket.handle)) {
             const stream = listener.server.accept(runtime_io.current()) catch break;
-            const conn = newConnection(stream, listener.options.callbacks, listener);
+            const conn = newConnection(stream, listener.options.callbacks, true, 0, listener.options.max_outgoing);
             listener.connections.append(abi.heap, conn) catch @panic("OOM");
             if (listener.options.on_connect) |on_connect| on_connect(conn);
         }
@@ -235,7 +337,9 @@ pub fn poll() void {
 }
 
 fn pollConnection(conn: *Connection) void {
-    if (conn.closed or !conn.callbacks.any() or !ready(conn.stream.socket.handle)) return;
+    if (conn.closed or !conn.polled) return;
+    if (!conn.flush()) return conn.close();
+    if (!ready(conn.stream.socket.handle)) return;
     const reader = &conn.reader.interface;
     reader.fillMore() catch return conn.close();
 
@@ -250,8 +354,8 @@ fn pollConnection(conn: *Connection) void {
                 const line = (reader.takeDelimiter('\n') catch break) orelse break;
                 if (conn.callbacks.on_line) |on_line| on_line(conn, std.mem.trimEnd(u8, line, "\r"));
             }
-            // A line longer than the buffer can never complete.
-            if (reader.bufferedLen() == conn.buffer.len) conn.close();
+            // A full buffer without a line ending can never complete a line.
+            if (!conn.closed and reader.bufferedLen() == conn.buffer.len) conn.close();
         },
     }
 }
@@ -280,7 +384,7 @@ fn sweepConnections(list: *std.ArrayList(*Connection)) void {
     }
 }
 
-/// Closes everything, done by `register` when the plugin unloads.
+/// Closes every socket. `register` calls this when the plugin unloads.
 pub fn closeAll() void {
     for (listeners.items) |listener| listener.close();
     for (clients.items) |conn| conn.close();

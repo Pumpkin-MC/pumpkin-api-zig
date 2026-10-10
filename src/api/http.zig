@@ -1,5 +1,7 @@
-//! HTTP and HTTPS requests in one call, on top of `std.http.Client`. HTTPS
-//! trusts the certificates in `ca-certificates.crt` in the data folder.
+//! HTTP and HTTPS requests in a single call, built on `std.http.Client`.
+//! HTTPS trusts the certificates in `ca-certificates.crt` in the plugin's data
+//! folder. A request blocks until the response arrives, so don't send them
+//! from events that fire every tick.
 //!
 //!     const res = try pumpkin.http.get("https://api.example.com/status", .{});
 
@@ -17,21 +19,22 @@ pub const Options = struct {
     content_type: ?[]const u8 = null,
     authorization: ?[]const u8 = null,
     user_agent: []const u8 = "pumpkin-api-zig",
-    /// Responses with a longer body fail with `error.BodyTooLong`.
+    /// Requests whose response body is longer fail with `error.BodyTooLong`.
     max_body: usize = 8 * 1024 * 1024,
 };
 
 pub const Response = struct {
     status: Status,
-    /// Lives until the current callback returns.
+    /// Valid until the current callback returns.
     body: []const u8,
 
-    /// Whether the status is in the 2xx range.
+    /// Reports whether the status is in the 2xx range.
     pub fn ok(res: Response) bool {
         return res.status.class() == .success;
     }
 
-    /// Parses the body as JSON into a `T` that lives until the current callback returns.
+    /// Parses the body as JSON into a `T` that is valid until the current
+    /// callback returns.
     pub fn json(res: Response, comptime T: type) !T {
         return std.json.parseFromSliceLeaky(T, abi.arena(), res.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
     }
@@ -63,7 +66,7 @@ pub fn patch(url: []const u8, body: []const u8, options: Options) Error!Response
     return request(.PATCH, url, body, options);
 }
 
-/// Sends `value` as JSON with the given method.
+/// Sends `value` encoded as JSON, with the given method.
 pub fn sendJson(method: Method, url: []const u8, value: anytype, options: Options) Error!Response {
     const body = std.json.Stringify.valueAlloc(abi.arena(), value, .{}) catch return error.OutOfMemory;
     var with_type = options;
@@ -115,14 +118,14 @@ fn loadCertificates(c: *std.http.Client) error{NoCertificates}!void {
     certificates_loaded = true;
 }
 
-/// Closes the shared client, done by `register` when the plugin unloads.
+/// Closes the shared client. `register` calls this when the plugin unloads.
 pub fn deinit() void {
     if (shared) |*c| c.deinit();
     shared = null;
     certificates_loaded = false;
 }
 
-/// Passes bytes on until `limit` is reached, then fails the write.
+/// Forwards writes until `limit` bytes have passed through, then fails them.
 const LimitedWriter = struct {
     inner: *std.Io.Writer,
     left: usize,

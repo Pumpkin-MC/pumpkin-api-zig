@@ -45,6 +45,8 @@ const NetTest = struct {
         .{ "net: udp sockets with callbacks", highLevelUdp },
         .{ "net: closing a listener closes its connections", highLevelClose },
         .{ "net: poll() returns right away when nothing is waiting", highLevelIdlePoll },
+        .{ "net: a client that doesn't read can't block, and gets closed", highLevelSlowReader },
+        .{ "net: readLine gives up after its timeout", highLevelReadTimeout },
     };
 
     fn run(sender: cmd.Sender, _: pumpkin.Server, _: cmd.Args) cmd.Result {
@@ -145,7 +147,7 @@ const NetTest = struct {
         if (!waitReady(accepted.socket.handle)) return error.NotReadyWithData;
     }
 
-    /// The other end runs in the same process, give the kernel a moment.
+    /// The other end runs in the same process, so give the kernel a moment to deliver.
     fn waitReady(handle: net.Socket.Handle) bool {
         for (0..100) |_| {
             if (pumpkin.net.ready(handle)) return true;
@@ -322,7 +324,7 @@ const hl = struct {
         closes += 1;
     }
 
-    /// Polls until `done` holds, for up to a second.
+    /// Polls until `done` returns true, for at most a second.
     fn pollUntil(comptime done: fn () bool) bool {
         for (0..100) |_| {
             pumpkin.net.poll();
@@ -412,6 +414,50 @@ fn highLevelIdlePoll() !void {
     const start = std.Io.Clock.awake.now(io);
     for (0..10) |_| high.poll();
     if (start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 100) return error.PollBlocked;
+}
+
+fn highLevelSlowReader() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const io = pumpkin.io();
+    const server = try high.listen(.{ .port = 0, .callbacks = .{ .on_close = hl.onClose } });
+    defer server.close();
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    if (!hl.pollUntil(struct {
+        fn f() bool {
+            return true;
+        }
+    }.f) or server.connections.items.len != 1) return error.NotAccepted;
+    const conn = server.connections.items[0];
+
+    const chunk = try pumpkin.abi.arena().alloc(u8, 64 * 1024);
+    @memset(chunk, 'x');
+    const start = std.Io.Clock.awake.now(io);
+    var refused = false;
+    for (0..64) |_| {
+        conn.send(chunk) catch {
+            refused = true;
+            break;
+        };
+    }
+    if (start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 500) return error.SendBlocked;
+    if (!refused or hl.closes != 1) return error.NotClosed;
+}
+
+fn highLevelReadTimeout() !void {
+    const high = pumpkin.net;
+    const io = pumpkin.io();
+    const server = try high.listen(.{ .port = 0 });
+    defer server.close();
+    const client = try high.connect("127.0.0.1", server.address().getPort(), .{ .read_timeout_ms = 300 });
+    defer client.close();
+    high.poll();
+
+    const start = std.Io.Clock.awake.now(io);
+    if (client.readLine()) |_| return error.GotALine else |err| if (err != error.Timeout) return err;
+    const took = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    if (took < 250 or took > 2000) return error.WrongDuration;
 }
 
 comptime {
