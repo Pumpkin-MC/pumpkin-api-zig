@@ -33,50 +33,43 @@ pub fn build(b: *std.Build) void {
     _ = pumpkin_api.addPlugin(b, b.dependency("pumpkin_api_zig", .{}), .{
         .name = "my-plugin",
         .root_source_file = b.path("src/main.zig"),
-        .imports = &.{},
     });
 }
 ```
 
 `zig build` produces `zig-out/my-plugin.wasm`. Copy it into the server's `plugins` folder and restart the server.
 
-### Adding Additional Imports
-To add additional imports use the .imports field.
+### Dependencies
+
+Other Zig packages are added through `.imports`. They have to be built for the same target as the plugin, which `pumpkin_api.target(b)` returns:
+
 ```zig
 const std = @import("std");
 const pumpkin_api = @import("pumpkin_api_zig");
 
 pub fn build(b: *std.Build) void {
-    const target = b.resolveTargetQuery(.{
-        .cpu_arch = .wasm32,
-        .os_tag = .wasi,
+    const sqlite = b.dependency("sqlite", .{
+        .target = pumpkin_api.target(b),
+        .optimize = .ReleaseSmall,
     });
 
-    const optimize = b.standardOptimizeOption(.{});
-
-    const api = b.dependency("pumpkin_api_zig", .{});
-
-    const sqliteDep = b.dependency("sqlite", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    _ = pumpkin_api.addPlugin(b, api, .{
+    _ = pumpkin_api.addPlugin(b, b.dependency("pumpkin_api_zig", .{}), .{
         .name = "my-plugin",
         .root_source_file = b.path("src/main.zig"),
-        .optimize = optimize,
-        .imports = &.{
-            .{
-                .name = "sqlite",
-                .module = sqliteDep.module("sqlite"),
-            },
-        },
+        .imports = &.{.{ .name = "sqlite", .module = sqlite.module("sqlite") }},
     });
 }
 ```
-Create the normal zig dependency then pass the name and module through in the imports field.
 
-Dependencies have to be built for `wasm32-wasi` as well, so pass them the same target. C libraries work too, including ones that link libc, since Zig builds them against wasi-libc. What a library can't use is anything WASI doesn't provide to plugins, such as threads, child processes or network sockets.
+`addPlugin` also returns the plugin's root module, for anything else the build needs, such as C sources of your own:
+
+```zig
+const plugin = pumpkin_api.addPlugin(b, api, .{ ... });
+plugin.module.addCSourceFile(.{ .file = b.path("src/helper.c") });
+plugin.module.link_libc = true;
+```
+
+C libraries work too, including ones that link libc, since Zig builds them against wasi-libc. What a library can't use is anything WASI doesn't provide to plugins, such as threads, child processes or network sockets.
 
 ## A plugin
 
