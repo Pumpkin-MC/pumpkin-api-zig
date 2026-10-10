@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
 ```
 Create the normal zig dependency then pass the name and module through in the imports field.
 
-C Based Libraries and Libraries that require `linkLibC` will not work when compiling to `wasm32-wasi`.
+Dependencies have to be built for `wasm32-wasi` as well, so pass them the same target. C libraries work too, including ones that link libc, since Zig builds them against wasi-libc. What a library can't use is anything WASI doesn't provide to plugins, such as threads, child processes or network sockets.
 
 ## A plugin
 
