@@ -3,7 +3,8 @@
 //! The namespaces below mirror the WIT interfaces one to one and are generated.
 //! What's written by hand here is the glue a plugin needs to get going:
 //! `register`, typed event and task handlers, `cmd` for commands, `msg` for
-//! text components, `menu` for inventory menus and `std.log` support.
+//! text components, `menu` for inventory menus, `http` for web requests and
+//! `std.log` support.
 //!
 //! Whatever the API hands out is only good until the current callback returns:
 //! strings, slices and records live in a per-call arena and handles are
@@ -17,6 +18,7 @@ pub const abi = @import("runtime/abi.zig");
 pub const cmd = @import("api/cmd.zig");
 pub const msg = @import("api/msg.zig");
 pub const menu = @import("api/menu.zig");
+pub const http = @import("api/http.zig");
 const runtime_io = @import("runtime/io.zig");
 const wit = @import("bindings/pumpkin.zig");
 
@@ -233,6 +235,7 @@ pub fn register(comptime Plugin: type) void {
         }
 
         fn onUnload(ctx: Context) abi.Result(void, []const u8) {
+            defer http.deinit();
             return lifecycle("onUnload", ctx);
         }
 

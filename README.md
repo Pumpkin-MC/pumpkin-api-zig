@@ -218,7 +218,7 @@ zig build check  # compiles every generated binding
 zig build gen    # regenerates src/bindings/
 ```
 
-`src/pumpkin.zig` is the package root. `src/api/` holds the hand-written helpers (`cmd`, `msg`, `menu`), `src/runtime/` the canonical ABI layer and the `std.Io` behind `pumpkin.io()`, and `src/bindings/` the generated bindings, which only `zig build gen` writes.
+`src/pumpkin.zig` is the package root. `src/api/` holds the hand-written helpers (`cmd`, `msg`, `menu`, `http`), `src/runtime/` the canonical ABI layer and the `std.Io` behind `pumpkin.io()`, and `src/bindings/` the generated bindings, which only `zig build gen` writes.
 
 The Pumpkin bindings are generated from the `wit` submodule, [pumpkin-plugin-wit](https://github.com/Pumpkin-MC/pumpkin-plugin-wit).
 

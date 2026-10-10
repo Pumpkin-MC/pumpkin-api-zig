@@ -1,14 +1,16 @@
-//! HTTPS with `std.http.Client`, trusting the certificates in the data folder.
+//! Web requests with `pumpkin.http`, one command per method.
 //!
-//! The plugin can't read the system's certificates, so copy them into its data
-//! folder first, for example:
+//! HTTPS needs the system's certificates in the data folder, for example:
 //!
 //!     cp /etc/ssl/certs/ca-certificates.crt plugins/data/example-https/
+//!
+//! Try `/web get https://httpbin.org/get` or `/web post https://httpbin.org/post hello`.
 
 const std = @import("std");
 const pumpkin = @import("pumpkin");
 const cmd = pumpkin.cmd;
 const msg = pumpkin.msg;
+const http = pumpkin.http;
 
 pub const std_options: std.Options = .{ .logFn = pumpkin.logFn };
 
@@ -17,51 +19,64 @@ const Https = struct {
         .name = "example-https",
         .version = "0.1.0",
         .authors = &.{"Pumpkin"},
-        .description = "Fetches a page over HTTPS with /get <url>.",
+        .description = "Sends web requests with /web <method> <url> [body].",
         .permissions = &.{ "network.dns", "network.tcp.connect", "fs.read.data" },
     };
 
+    const url_arg: cmd.ArgumentType = .{ .string = .quotable };
+    const body_arg: cmd.ArgumentType = .{ .string = .greedy };
+
     pub const commands: []const cmd.Spec = &.{.{
-        .names = &.{"get"},
-        .description = "Fetches a URL and shows the status and the size of the body.",
-        .permission = "example-https:command.get",
+        .names = &.{"web"},
+        .description = "Sends a web request and shows the response.",
+        .permission = "example-https:command.web",
         .default = .{ .op = .two },
         .then = &.{
-            .argument("url", .{ .string = .greedy }, .{ .run = cmd.typed(get) }),
+            .literal("get", .{ .then = &.{.argument("url", url_arg, .{ .run = cmd.typed(get) })} }),
+            .literal("head", .{ .then = &.{.argument("url", url_arg, .{ .run = cmd.typed(head) })} }),
+            .literal("delete", .{ .then = &.{.argument("url", url_arg, .{ .run = cmd.typed(delete) })} }),
+            .literal("post", .{ .then = &.{.argument("url", url_arg, .{ .then = &.{.argument("body", body_arg, .{ .run = cmd.typed(post) })} })} }),
+            .literal("put", .{ .then = &.{.argument("url", url_arg, .{ .then = &.{.argument("body", body_arg, .{ .run = cmd.typed(put) })} })} }),
+            .literal("patch", .{ .then = &.{.argument("url", url_arg, .{ .then = &.{.argument("body", body_arg, .{ .run = cmd.typed(patch) })} })} }),
         },
     }};
 
-    var client: std.http.Client = undefined;
+    const Url = struct { url: []const u8 };
+    const UrlAndBody = struct { url: []const u8, body: []const u8 };
 
-    pub fn onLoad(_: pumpkin.Context) !void {
-        const io = pumpkin.io();
-        client = .{ .allocator = pumpkin.abi.heap, .io = io };
-
-        const now = std.Io.Clock.real.now(io);
-        client.ca_bundle.addCertsFromFilePath(pumpkin.abi.heap, io, now, .cwd(), "ca-certificates.crt") catch |err| {
-            std.log.warn("no certificates loaded ({t}), see examples/https.zig", .{err});
-        };
-        client.now = now;
+    fn get(sender: cmd.Sender, _: pumpkin.Server, args: Url) cmd.Result {
+        return show(sender, http.get(args.url, .{}));
     }
 
-    pub fn onUnload(_: pumpkin.Context) !void {
-        client.deinit();
+    fn head(sender: cmd.Sender, _: pumpkin.Server, args: Url) cmd.Result {
+        return show(sender, http.head(args.url, .{}));
     }
 
-    fn get(sender: cmd.Sender, _: pumpkin.Server, args: struct { url: []const u8 }) cmd.Result {
-        var body: std.Io.Writer.Allocating = .init(pumpkin.abi.arena());
-        const result = client.fetch(.{
-            .location = .{ .url = args.url },
-            .response_writer = &body.writer,
-            .keep_alive = false,
-        }) catch |err| return cmd.fail(@errorName(err));
+    fn delete(sender: cmd.Sender, _: pumpkin.Server, args: Url) cmd.Result {
+        return show(sender, http.delete(args.url, .{}));
+    }
 
-        sender.sendMessage(msg.fmt(.green, "{d} {s}, {d} bytes", .{
-            @intFromEnum(result.status),
-            result.status.phrase() orelse "",
-            body.written().len,
+    fn post(sender: cmd.Sender, _: pumpkin.Server, args: UrlAndBody) cmd.Result {
+        return show(sender, http.post(args.url, args.body, .{ .content_type = "text/plain" }));
+    }
+
+    fn put(sender: cmd.Sender, _: pumpkin.Server, args: UrlAndBody) cmd.Result {
+        return show(sender, http.put(args.url, args.body, .{ .content_type = "text/plain" }));
+    }
+
+    fn patch(sender: cmd.Sender, _: pumpkin.Server, args: UrlAndBody) cmd.Result {
+        return show(sender, http.patch(args.url, args.body, .{ .content_type = "text/plain" }));
+    }
+
+    fn show(sender: cmd.Sender, result: http.Error!http.Response) cmd.Result {
+        const res = result catch |err| return cmd.fail(@errorName(err));
+        sender.sendMessage(msg.fmt(if (res.ok()) .green else .red, "{d} {s}, {d} bytes", .{
+            @intFromEnum(res.status),
+            res.status.phrase() orelse "",
+            res.body.len,
         }));
-        return cmd.ok(1);
+        if (res.body.len > 0) sender.sendMessage(msg.fmt(.gray, "{s}", .{res.body[0..@min(res.body.len, 256)]}));
+        return cmd.ok(@intFromEnum(res.status));
     }
 };
 
