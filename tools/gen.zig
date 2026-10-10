@@ -1,9 +1,10 @@
 //! Generates the Zig bindings from the output of `wasm-tools component wit --json`.
 //!
-//! usage: gen <wit.json> <src-dir> [name]
+//! usage: gen <wit.json> <out-dir> [name] [abi]
 //!
-//! Writes <src-dir>/<name>.zig, one file per interface under <src-dir>/<name>/
-//! and <src-dir>/<name>/exports.zig for the world's exports. `name` is "wit"
+//! Writes <out-dir>/<name>.zig, one file per interface under <out-dir>/<name>/
+//! and <out-dir>/<name>/exports.zig for the world's exports. `name` is "wit"
+//! and `abi`, the path of abi.zig seen from <out-dir>/<name>/, "../abi.zig"
 //! unless given.
 
 const std = @import("std");
@@ -86,6 +87,8 @@ const Gen = struct {
     interfaces: []const Value,
     packages: []const Value,
     world: Value,
+    /// Where the generated files import abi.zig from.
+    abi_path: []const u8,
     /// Interfaces the world imports. The rest only contribute types.
     imports: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
 
@@ -98,7 +101,7 @@ const Gen = struct {
     /// the file has been written.
     imported: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
 
-    fn init(arena: Allocator, root: Value) Gen {
+    fn init(arena: Allocator, root: Value, abi_path: []const u8) Gen {
         const packages = items(member(root, "packages"));
         const worlds = items(member(root, "worlds"));
         if (packages.len == 0) fatal("no packages", .{});
@@ -113,6 +116,7 @@ const Gen = struct {
             .interfaces = items(member(root, "interfaces")),
             .packages = packages,
             .world = worlds[index(root_worlds[0])],
+            .abi_path = abi_path,
         };
         for (member(g.world, "imports").object.values()) |item| {
             const iface = maybe(item, "interface") orelse continue;
@@ -184,7 +188,7 @@ const Gen = struct {
         return out.items;
     }
 
-    /// Everything the generator or src/abi.zig can't express ends up here
+    /// Everything the generator or src/runtime/abi.zig can't express ends up here
     /// instead of in bindings that are quietly wrong.
     fn validate(g: *const Gen) void {
         for (0..g.types.len) |id| {
@@ -363,7 +367,7 @@ const Gen = struct {
         }
     }
 
-    // Flattening. src/abi.zig does the same from the Zig types at comptime and
+    // Flattening. src/runtime/abi.zig does the same from the Zig types at comptime and
     // refuses to compile when the two disagree.
 
     fn join(a: Core, b: Core) Core {
@@ -711,7 +715,7 @@ const Gen = struct {
         var out: Writer.Allocating = .init(g.arena);
         try out.writer.writeAll(header);
         const uses_abi = raw.written().len != 0 or std.mem.indexOf(u8, body.written(), "abi.") != null;
-        if (uses_abi) try out.writer.writeAll("const abi = @import(\"../abi.zig\");\n");
+        if (uses_abi) try out.writer.print("const abi = @import(\"{s}\");\n", .{g.abi_path});
         try g.writeImports(&out.writer);
         if (uses_abi or g.used.count() != 0) try out.writer.writeAll("\n");
         try out.writer.writeAll(body.written());
@@ -785,7 +789,7 @@ const Gen = struct {
         }
 
         var out: Writer.Allocating = .init(g.arena);
-        try out.writer.writeAll(header ++ "const std = @import(\"std\");\nconst abi = @import(\"../abi.zig\");\n");
+        try out.writer.print(header ++ "const std = @import(\"std\");\nconst abi = @import(\"{s}\");\n", .{g.abi_path});
         try g.writeImports(&out.writer);
         try out.writer.print("\n{s}\n", .{std.mem.trimEnd(u8, body.written(), "\n")});
         return out.written();
@@ -793,9 +797,9 @@ const Gen = struct {
 };
 
 /// Paths are relative to the source directory.
-pub fn generate(arena: Allocator, source: []const u8, name: []const u8) ![]const File {
+pub fn generate(arena: Allocator, source: []const u8, name: []const u8, abi_path: []const u8) ![]const File {
     const root = try std.json.parseFromSliceLeaky(Value, arena, source, .{});
-    var g: Gen = .init(arena, root);
+    var g: Gen = .init(arena, root, abi_path);
 
     var files: std.ArrayList(File) = .empty;
     var root_file: Writer.Allocating = .init(arena);
@@ -822,8 +826,9 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3 and args.len != 4) fatal("usage: gen <wit.json> <src-dir> [name]", .{});
-    const name = if (args.len == 4) args[3] else "wit";
+    if (args.len < 3 or args.len > 5) fatal("usage: gen <wit.json> <out-dir> [name] [abi]", .{});
+    const name = if (args.len >= 4) args[3] else "wit";
+    const abi_path = if (args.len == 5) args[4] else "../abi.zig";
 
     const cwd = std.Io.Dir.cwd();
     const source = cwd.readFileAlloc(io, args[1], arena, .unlimited) catch |err| {
@@ -833,7 +838,7 @@ pub fn main(init: std.process.Init) !void {
     const out = try cwd.createDirPathOpen(io, args[2], .{});
     try out.deleteTree(io, name);
     try out.createDirPath(io, name);
-    for (try generate(arena, source, name)) |file| {
+    for (try generate(arena, source, name, abi_path)) |file| {
         try out.writeFile(io, .{ .sub_path = file.path, .data = file.data });
     }
 }
@@ -850,7 +855,7 @@ test "demo world" {
         .{ .path = "wit.zig", .data = @embedFile("testdata/expected/wit.zig") },
     };
 
-    const files = try generate(arena_state.allocator(), @embedFile("testdata/demo.json"), "wit");
+    const files = try generate(arena_state.allocator(), @embedFile("testdata/demo.json"), "wit", "../abi.zig");
     try std.testing.expectEqual(expected.len, files.len);
     for (expected, files) |want, got| {
         try std.testing.expectEqualStrings(want.path, got.path);

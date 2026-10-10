@@ -215,11 +215,13 @@ Server admins can still block permissions in the server config.
 git submodule update --init
 zig build test   # unit tests for the ABI layer and the generator
 zig build check  # compiles every generated binding
-zig build gen    # regenerates src/wit/, src/plugin.wit and src/wasi/
+zig build gen    # regenerates src/bindings/
 ```
+
+`src/pumpkin.zig` is the package root. `src/api/` holds the hand-written helpers (`cmd`, `msg`, `menu`), `src/runtime/` the canonical ABI layer and the `std.Io` behind `pumpkin.io()`, and `src/bindings/` the generated bindings, which only `zig build gen` writes.
 
 The Pumpkin bindings are generated from the `wit` submodule, [pumpkin-plugin-wit](https://github.com/Pumpkin-MC/pumpkin-plugin-wit).
 
-The WASI bindings come from `wasi/`. `wasi/world.wit` lists the WASI interfaces plugins get bindings for, currently `wasi:sockets` and what it depends on. Their definitions in `wasi/deps/` are fetched from the [wasi.dev](https://wasi.dev) registry with [`wkg`](https://github.com/bytecodealliance/wasm-pkg-tools), pinned in `wasi/wkg.lock`. To change them, edit `world.wit` and run `wkg fetch .` inside `wasi/`, then `zig build gen`. The WASI interfaces and everything derived from them in `src/wasi/` are © the Contributors to the WASI Specification, published by the WebAssembly Community Group under the W3C Community Contributor License Agreement, see [`wasi/LICENSE.md`](wasi/LICENSE.md).
+The WASI bindings come from `wasi/`. `wasi/world.wit` lists the WASI interfaces plugins get bindings for, currently `wasi:sockets` and what it depends on. Their definitions in `wasi/deps/` are fetched from the [wasi.dev](https://wasi.dev) registry with [`wkg`](https://github.com/bytecodealliance/wasm-pkg-tools), pinned in `wasi/wkg.lock`. To change them, edit `world.wit` and run `wkg fetch .` inside `wasi/`, then `zig build gen`. The WASI interfaces and everything derived from them in `src/bindings/wasi/` are © the Contributors to the WASI Specification, published by the WebAssembly Community Group under the W3C Community Contributor License Agreement, see [`wasi/LICENSE.md`](wasi/LICENSE.md).
 
 `adapter/wasi_snapshot_preview1.reactor.wasm` is the WASI preview 1 adapter from [Wasmtime](https://github.com/bytecodealliance/wasmtime) 48.0.2 (Apache-2.0 WITH LLVM-exception). Zig emits WASI preview 1, and the adapter maps it onto the preview 2 interfaces the server provides. The WASI version in `wasi/world.wit` has to stay the one the adapter imports.

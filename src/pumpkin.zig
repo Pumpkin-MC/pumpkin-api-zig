@@ -13,12 +13,12 @@
 
 const std = @import("std");
 
-pub const abi = @import("abi.zig");
-pub const cmd = @import("cmd.zig");
-pub const msg = @import("msg.zig");
-pub const menu = @import("menu.zig");
-const net_io = @import("net.zig");
-const wit = @import("wit.zig");
+pub const abi = @import("runtime/abi.zig");
+pub const cmd = @import("api/cmd.zig");
+pub const msg = @import("api/msg.zig");
+pub const menu = @import("api/menu.zig");
+const runtime_io = @import("runtime/io.zig");
+const wit = @import("bindings/pumpkin.zig");
 
 pub const advancement = wit.advancement;
 pub const attributes = wit.attributes;
@@ -88,21 +88,12 @@ pub const Metadata = struct {
     permissions: []const []const u8 = &.{},
 };
 
-var threaded: std.Io.Threaded = .init_single_threaded;
-var vtable: ?std.Io.VTable = null;
-
 pub const net = struct {
-    pub const ready = net_io.ready;
+    pub const ready = runtime_io.ready;
 };
 
 /// The `std.Io` to pass to file and network calls.
-pub fn io() std.Io {
-    if (vtable == null) {
-        vtable = threaded.io().vtable.*;
-        net_io.install(&vtable.?);
-    }
-    return .{ .userdata = &threaded, .vtable = &vtable.? };
-}
+pub const io = runtime_io.current;
 
 /// Plug this into `std_options.logFn` to route `std.log` to the server console.
 pub fn logFn(
@@ -347,4 +338,5 @@ fn goalFromId(id: u32) *const AiGoal {
 
 test {
     _ = abi;
+    _ = cmd;
 }

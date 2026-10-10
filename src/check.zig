@@ -1,10 +1,10 @@
 //! Not part of the package. Zig only analyzes what gets used, so a plugin build
-//! never looks at most of src/wit and src/wasi. This takes the address of every generated
+//! never looks at most of src/bindings. This takes the address of every generated
 //! function to get all of them compiled, see `zig build check`.
 
 const std = @import("std");
-const wit = @import("wit.zig");
-const wasi = @import("wasi.zig");
+const wit = @import("bindings/pumpkin.zig");
+const wasi = @import("bindings/wasi.zig");
 
 fn collect(comptime T: type) []const *const anyopaque {
     var out: []const *const anyopaque = &.{};

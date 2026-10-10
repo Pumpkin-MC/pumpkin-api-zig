@@ -23,7 +23,7 @@ jobs:
       - name: Set up wasm-tools
         uses: bytecodealliance/actions/wasm-tools/setup@v1
         with:
-          # The generated src/plugin.wit is printed by wasm-tools, keep this in
+          # The generated src/bindings/plugin.wit is printed by wasm-tools, keep this in
           # sync with what `zig build gen` was last run with.
           version: "1.259.0"
 
