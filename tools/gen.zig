@@ -1,9 +1,10 @@
 //! Generates the Zig bindings from the output of `wasm-tools component wit --json`.
 //!
-//! usage: gen <wit.json> <src-dir>
+//! usage: gen <wit.json> <src-dir> [name]
 //!
-//! Writes <src-dir>/wit.zig, one file per interface under <src-dir>/wit/ and
-//! <src-dir>/wit/exports.zig for the world's exports.
+//! Writes <src-dir>/<name>.zig, one file per interface under <src-dir>/<name>/
+//! and <src-dir>/<name>/exports.zig for the world's exports. `name` is "wit"
+//! unless given.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -83,11 +84,8 @@ const Gen = struct {
     arena: Allocator,
     types: []const Value,
     interfaces: []const Value,
+    packages: []const Value,
     world: Value,
-    /// "pumpkin:plugin"
-    namespace: []const u8,
-    /// "0.1.0"
-    version: []const u8,
     /// Interfaces the world imports. The rest only contribute types.
     imports: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
 
@@ -103,19 +101,18 @@ const Gen = struct {
     fn init(arena: Allocator, root: Value) Gen {
         const packages = items(member(root, "packages"));
         const worlds = items(member(root, "worlds"));
-        if (packages.len != 1) fatal("expected one package, found {d}", .{packages.len});
-        if (worlds.len != 1) fatal("expected one world, found {d}", .{worlds.len});
+        if (packages.len == 0) fatal("no packages", .{});
 
-        const package = text(member(packages[0], "name"));
-        const at = std.mem.indexOfScalar(u8, package, '@') orelse fatal("package '{s}' has no version", .{package});
+        // Dependencies bring worlds of their own, the one to generate is the root package's.
+        const root_worlds = member(packages[packages.len - 1], "worlds").object.values();
+        if (root_worlds.len != 1) fatal("expected one world in the root package, found {d}", .{root_worlds.len});
 
         var g: Gen = .{
             .arena = arena,
             .types = items(member(root, "types")),
             .interfaces = items(member(root, "interfaces")),
-            .world = worlds[0],
-            .namespace = package[0..at],
-            .version = package[at + 1 ..],
+            .packages = packages,
+            .world = worlds[index(root_worlds[0])],
         };
         for (member(g.world, "imports").object.values()) |item| {
             const iface = maybe(item, "interface") orelse continue;
@@ -198,10 +195,11 @@ const Gen = struct {
             }
             if (d.kind == .resource) {
                 const owner = g.ownerOf(id) orelse fatal("resource '{s}' has no interface", .{label});
-                if (!g.imports.contains(owner)) fatal("resource '{s}' is exported by the guest, which is not supported", .{label});
+                if (g.isExported(owner)) fatal("resource '{s}' is exported by the guest, which is not supported", .{label});
             }
+            if (d.kind == .list) continue;
             for (g.children(d)) |child| {
-                if (g.isBorrow(child)) fatal("'{s}' contains a borrowed handle, only parameters may", .{label});
+                if (g.isBorrow(child)) fatal("'{s}' contains a borrowed handle, only parameters and lists may", .{label});
             }
         }
 
@@ -218,6 +216,14 @@ const Gen = struct {
                 if (g.isBorrow(member(p, "type"))) fatal("export '{s}' borrows a handle, which is not supported", .{entry.key_ptr.*});
             }
         }
+    }
+
+    fn isExported(g: *const Gen, iface: usize) bool {
+        for (member(g.world, "exports").object.values()) |item| {
+            const exported = maybe(item, "interface") orelse continue;
+            if (index(member(exported, "id")) == iface) return true;
+        }
+        return false;
     }
 
     fn validateFunc(g: *const Gen, name: []const u8, func: Value) void {
@@ -256,6 +262,13 @@ const Gen = struct {
 
     fn moduleName(g: *const Gen, iface: usize) []const u8 {
         return g.words(g.interfaceName(iface), .snake);
+    }
+
+    /// "pumpkin:plugin/event@0.1.0"
+    fn importPath(g: *const Gen, iface: usize) []const u8 {
+        const package = text(member(g.packages[index(member(g.interfaces[iface], "package"))], "name"));
+        const at = std.mem.indexOfScalar(u8, package, '@') orelse fatal("package '{s}' has no version", .{package});
+        return g.print("{s}/{s}@{s}", .{ package[0..at], g.interfaceName(iface), package[at + 1 ..] });
     }
 
     fn funcName(g: *const Gen, func: Value) []const u8 {
@@ -301,7 +314,7 @@ const Gen = struct {
             if (g.ownerOf(id)) |owner| {
                 if (g.current != owner) {
                     g.used.put(g.arena, owner, {}) catch oom();
-                    try w.print("{s}.", .{g.moduleName(owner)});
+                    try w.print("{f}.", .{std.zig.fmtId(g.moduleName(owner))});
                 }
                 return w.writeAll(g.words(name, .title));
             }
@@ -309,7 +322,13 @@ const Gen = struct {
             if (d.kind != .type) fatal("the world defines '{s}' itself, which is not supported", .{name});
             return g.writeRef(w, d.payload);
         }
-        if (d.kind == .handle) return g.writeTypeId(w, index(d.payload.object.values()[0]));
+        if (d.kind == .handle) {
+            const resource = index(d.payload.object.values()[0]);
+            if (!d.payload.object.contains("borrow")) return g.writeTypeId(w, resource);
+            try w.writeAll("abi.Borrowed(");
+            try g.writeTypeId(w, resource);
+            return w.writeAll(")");
+        }
         try g.writeShape(w, d);
     }
 
@@ -433,8 +452,15 @@ const Gen = struct {
         const contents = maybe(docs, "contents") orelse return;
         var lines = std.mem.splitScalar(u8, text(contents), '\n');
         while (lines.next()) |line| {
-            const trimmed = std.mem.trimEnd(u8, line, " \r");
-            if (trimmed.len == 0) try w.print("{s}///\n", .{indent}) else try w.print("{s}/// {s}\n", .{ indent, trimmed });
+            const trimmed = std.mem.trimEnd(u8, line, " \t\r");
+            if (trimmed.len == 0) {
+                try w.print("{s}///\n", .{indent});
+                continue;
+            }
+            // Zig doesn't allow tabs in comments.
+            try w.print("{s}/// ", .{indent});
+            for (trimmed) |c| try if (c == '\t') w.writeAll("    ") else w.writeByte(c);
+            try w.writeByte('\n');
         }
     }
 
@@ -588,7 +614,15 @@ const Gen = struct {
         for (params, names.items, 0..) |p, name, i| {
             if (i != 0) try w.writeAll(", ");
             try w.print("{f}: ", .{std.zig.fmtId(name)});
-            if (is_method and i == 0) try w.writeAll(self_type.?) else try g.writeRef(w, member(p, "type"));
+            const t = member(p, "type");
+            if (is_method and i == 0) {
+                try w.writeAll(self_type.?);
+            } else if (g.isBorrow(t)) {
+                // A borrowed parameter is wrapped at the call site, the caller passes the plain handle.
+                try g.writeTypeId(w, index(g.def(index(t)).payload.object.values()[0]));
+            } else {
+                try g.writeRef(w, t);
+            }
         }
         try w.writeAll(") ");
         try g.writeRef(w, maybe(func, "result"));
@@ -639,7 +673,7 @@ const Gen = struct {
         const types = member(g.interfaces[iface], "types").object;
         const no_funcs: Value = .{ .object = .empty };
         const funcs = if (g.imports.contains(iface)) member(g.interfaces[iface], "functions") else no_funcs;
-        const module = g.print("{s}/{s}@{s}", .{ g.namespace, where, g.version });
+        const module = g.importPath(iface);
 
         var scope: Scope = .empty;
         for (types.keys()) |name| g.declare(&scope, g.words(name, .title), where);
@@ -745,7 +779,7 @@ const Gen = struct {
             const funcs = member(g.interfaces[iface], "functions").object;
             for (funcs.keys(), funcs.values()) |func_name, func| {
                 g.declare(&scope, g.words(func_name, .camel), "the world's exports");
-                const full = g.print("{s}/{s}@{s}#{s}", .{ g.namespace, g.interfaceName(iface), g.version, func_name });
+                const full = g.print("{s}#{s}", .{ g.importPath(iface), func_name });
                 try g.writeExport(&body.writer, full, func);
             }
         }
@@ -759,7 +793,7 @@ const Gen = struct {
 };
 
 /// Paths are relative to the source directory.
-pub fn generate(arena: Allocator, source: []const u8) ![]const File {
+pub fn generate(arena: Allocator, source: []const u8, name: []const u8) ![]const File {
     const root = try std.json.parseFromSliceLeaky(Value, arena, source, .{});
     var g: Gen = .init(arena, root);
 
@@ -767,16 +801,20 @@ pub fn generate(arena: Allocator, source: []const u8) ![]const File {
     var root_file: Writer.Allocating = .init(arena);
     try root_file.writer.writeAll(header);
 
+    var seen: Scope = .empty;
     for (0..g.interfaces.len) |iface| {
-        const name = g.moduleName(iface);
-        if (std.mem.eql(u8, name, "exports")) fatal("an interface is called 'exports'", .{});
-        try files.append(arena, .{ .path = g.print("wit/{s}.zig", .{name}), .data = try g.interfaceFile(iface) });
-        try root_file.writer.print("pub const {f} = @import(\"wit/{s}.zig\");\n", .{ std.zig.fmtId(name), name });
+        const module = g.moduleName(iface);
+        if (std.mem.eql(u8, module, "exports")) fatal("an interface is called 'exports'", .{});
+        g.declare(&seen, module, "the generated files");
+        try files.append(arena, .{ .path = g.print("{s}/{s}.zig", .{ name, module }), .data = try g.interfaceFile(iface) });
+        try root_file.writer.print("pub const {f} = @import(\"{s}/{s}.zig\");\n", .{ std.zig.fmtId(module), name, module });
     }
 
-    try files.append(arena, .{ .path = "wit/exports.zig", .data = try g.exportsFile() });
-    try root_file.writer.writeAll("pub const exports = @import(\"wit/exports.zig\");\n");
-    try files.append(arena, .{ .path = "wit.zig", .data = root_file.written() });
+    if (member(g.world, "exports").object.count() != 0) {
+        try files.append(arena, .{ .path = g.print("{s}/exports.zig", .{name}), .data = try g.exportsFile() });
+        try root_file.writer.print("pub const exports = @import(\"{s}/exports.zig\");\n", .{name});
+    }
+    try files.append(arena, .{ .path = g.print("{s}.zig", .{name}), .data = root_file.written() });
     return files.items;
 }
 
@@ -784,7 +822,8 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3) fatal("usage: gen <wit.json> <src-dir>", .{});
+    if (args.len != 3 and args.len != 4) fatal("usage: gen <wit.json> <src-dir> [name]", .{});
+    const name = if (args.len == 4) args[3] else "wit";
 
     const cwd = std.Io.Dir.cwd();
     const source = cwd.readFileAlloc(io, args[1], arena, .unlimited) catch |err| {
@@ -792,8 +831,9 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const out = try cwd.createDirPathOpen(io, args[2], .{});
-    try out.createDirPath(io, "wit");
-    for (try generate(arena, source)) |file| {
+    try out.deleteTree(io, name);
+    try out.createDirPath(io, name);
+    for (try generate(arena, source, name)) |file| {
         try out.writeFile(io, .{ .sub_path = file.path, .data = file.data });
     }
 }
@@ -810,7 +850,7 @@ test "demo world" {
         .{ .path = "wit.zig", .data = @embedFile("testdata/expected/wit.zig") },
     };
 
-    const files = try generate(arena_state.allocator(), @embedFile("testdata/demo.json"));
+    const files = try generate(arena_state.allocator(), @embedFile("testdata/demo.json"), "wit");
     try std.testing.expectEqual(expected.len, files.len);
     for (expected, files) |want, got| {
         try std.testing.expectEqualStrings(want.path, got.path);
