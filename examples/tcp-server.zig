@@ -5,16 +5,9 @@
 
 const std = @import("std");
 const pumpkin = @import("pumpkin");
+const net = pumpkin.net;
 
 pub const std_options: std.Options = .{ .logFn = pumpkin.logFn };
-
-const port = 25580;
-
-const Client = struct {
-    stream: std.Io.net.Stream,
-    reader: std.Io.net.Stream.Reader,
-    buffer: [1024]u8,
-};
 
 const TcpServer = struct {
     pub const metadata: pumpkin.Metadata = .{
@@ -29,71 +22,30 @@ const TcpServer = struct {
         .player_chat_event = .{ onChat, pumpkin.EventOptions{ .blocking = false } },
     };
 
-    var server: std.Io.net.Server = undefined;
-    var clients: std.ArrayList(*Client) = .empty;
+    var server: *net.Listener = undefined;
+    var game: pumpkin.Server = undefined;
 
-    pub fn onLoad(_: pumpkin.Context) !void {
-        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
-        server = try address.listen(pumpkin.io(), .{ .reuse_address = true });
-        _ = pumpkin.runEvery(poll, 0, 1);
-        std.log.info("listening on {f}", .{server.socket.address});
+    pub fn onLoad(ctx: pumpkin.Context) !void {
+        game = ctx.getServer();
+        game.keep();
+        server = try net.listen(.{
+            .port = 25580,
+            .on_connect = onConnect,
+            .callbacks = .{ .on_line = onLine },
+        });
+        std.log.info("listening on {f}", .{server.address()});
     }
 
-    pub fn onUnload(_: pumpkin.Context) !void {
-        while (clients.items.len > 0) drop(0);
-        server.deinit(pumpkin.io());
+    fn onConnect(conn: *net.Connection) void {
+        conn.send("connected to the Minecraft chat\n") catch {};
     }
 
-    /// Runs every tick and only touches sockets that have something waiting,
-    /// so it never blocks the server.
-    fn poll(srv: pumpkin.Server) void {
-        const io = pumpkin.io();
-        while (pumpkin.net.ready(server.socket.handle)) {
-            const stream = server.accept(io) catch break;
-            const client = pumpkin.abi.heap.create(Client) catch @panic("OOM");
-            client.stream = stream;
-            client.reader = stream.reader(io, &client.buffer);
-            clients.append(pumpkin.abi.heap, client) catch @panic("OOM");
-            send(client, "connected to the Minecraft chat\n");
-        }
-
-        var i: usize = 0;
-        while (i < clients.items.len) {
-            const client = clients.items[i];
-            const reader = &client.reader.interface;
-            if (pumpkin.net.ready(client.stream.socket.handle)) {
-                reader.fillMore() catch {
-                    drop(i);
-                    continue;
-                };
-            }
-            while (std.mem.indexOfScalar(u8, reader.buffered(), '\n') != null) {
-                const line = (reader.takeDelimiter('\n') catch break) orelse break;
-                const text = std.fmt.allocPrint(pumpkin.abi.arena(), "[tcp] {s}", .{std.mem.trimEnd(u8, line, "\r")}) catch return;
-                srv.broadcast(text);
-            }
-            if (reader.bufferedLen() == client.buffer.len) {
-                drop(i);
-                continue;
-            }
-            i += 1;
-        }
+    fn onLine(_: *net.Connection, line: []const u8) void {
+        game.broadcast(std.fmt.allocPrint(pumpkin.abi.arena(), "[tcp] {s}", .{line}) catch return);
     }
 
     fn onChat(_: pumpkin.Server, ev: *pumpkin.EventData(.player_chat_event)) void {
-        const line = std.fmt.allocPrint(pumpkin.abi.arena(), "<{s}> {s}\n", .{ ev.player.getName(), ev.message }) catch return;
-        for (clients.items) |client| send(client, line);
-    }
-
-    fn send(client: *Client, line: []const u8) void {
-        var writer = client.stream.writer(pumpkin.io(), &.{});
-        writer.interface.writeAll(line) catch {};
-    }
-
-    fn drop(i: usize) void {
-        const client = clients.swapRemove(i);
-        client.stream.close(pumpkin.io());
-        pumpkin.abi.heap.destroy(client);
+        server.broadcast(std.fmt.allocPrint(pumpkin.abi.arena(), "<{s}> {s}\n", .{ ev.player.getName(), ev.message }) catch return);
     }
 };
 

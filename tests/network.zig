@@ -32,6 +32,7 @@ const NetTest = struct {
         .{ "tcp ipv6: 100 KiB both ways, shutdown, EOF", tcpRoundTrip6 },
         .{ "tcp: listening on port 0 picks a port", ephemeralPort },
         .{ "tcp: ready() only once data is there", streamReady },
+        .{ "ready() turns false again once everything is read", readyClears },
         .{ "tcp: closed port refuses", connectionRefused },
         .{ "tcp: connect timeout after 1s", connectTimeout },
         .{ "udp ipv4: datagrams both ways", udpRoundTrip4 },
@@ -39,6 +40,11 @@ const NetTest = struct {
         .{ "udp: datagram bigger than the buffer is cut", udpTruncation },
         .{ "dns: localhost resolves", lookupLocalhost },
         .{ "dns: unknown host fails", lookupUnknown },
+        .{ "net: listen and connect with callbacks, lines both ways", highLevelTcp },
+        .{ "net: connect without callbacks, readLine", highLevelReadLine },
+        .{ "net: udp sockets with callbacks", highLevelUdp },
+        .{ "net: closing a listener closes its connections", highLevelClose },
+        .{ "net: poll() returns right away when nothing is waiting", highLevelIdlePoll },
     };
 
     fn run(sender: cmd.Sender, _: pumpkin.Server, _: cmd.Args) cmd.Result {
@@ -148,6 +154,35 @@ const NetTest = struct {
         return false;
     }
 
+    fn readyClears() !void {
+        const io = pumpkin.io();
+        const address: net.IpAddress = .{ .ip4 = .loopback(0) };
+        var server = try address.listen(io, .{});
+        defer server.deinit(io);
+        const client = try server.socket.address.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        if (!waitReady(server.socket.handle)) return error.NoConnection;
+        const accepted = try server.accept(io);
+        defer accepted.close(io);
+        if (pumpkin.net.ready(server.socket.handle)) return error.ListenerStillReady;
+
+        try writeAll(client, "ping");
+        if (!waitReady(accepted.socket.handle)) return error.NoData;
+        var buffer: [16]u8 = undefined;
+        var reader = accepted.reader(io, &buffer);
+        try reader.interface.fill(4);
+        if (pumpkin.net.ready(accepted.socket.handle)) return error.StreamStillReady;
+
+        const a = try address.bind(io, .{ .mode = .dgram });
+        defer a.close(io);
+        const b = try address.bind(io, .{ .mode = .dgram });
+        defer b.close(io);
+        try a.send(io, &b.address, "one");
+        if (!waitReady(b.handle)) return error.NoDatagram;
+        _ = try b.receive(io, &buffer);
+        if (pumpkin.net.ready(b.handle)) return error.SocketStillReady;
+    }
+
     fn connectionRefused() !void {
         const io = pumpkin.io();
         const address: net.IpAddress = .{ .ip4 = .loopback(0) };
@@ -252,6 +287,132 @@ const NetTest = struct {
         return error.Resolved;
     }
 };
+
+const hl = struct {
+    var server_got: ?[]const u8 = null;
+    var client_got: ?[]const u8 = null;
+    var datagram: ?[]const u8 = null;
+    var closes: u32 = 0;
+
+    fn reset() void {
+        server_got = null;
+        client_got = null;
+        datagram = null;
+        closes = 0;
+    }
+
+    fn onServerLine(conn: *pumpkin.net.Connection, line: []const u8) void {
+        server_got = pumpkin.abi.arena().dupe(u8, line) catch null;
+        conn.send("pong\n") catch {};
+    }
+
+    fn onClientLine(_: *pumpkin.net.Connection, line: []const u8) void {
+        client_got = pumpkin.abi.arena().dupe(u8, line) catch null;
+    }
+
+    fn greet(conn: *pumpkin.net.Connection) void {
+        conn.send("hello\n") catch {};
+    }
+
+    fn onDatagram(_: *pumpkin.net.Udp, _: pumpkin.net.Address, data: []const u8) void {
+        datagram = pumpkin.abi.arena().dupe(u8, data) catch null;
+    }
+
+    fn onClose(_: *pumpkin.net.Connection) void {
+        closes += 1;
+    }
+
+    /// Polls until `done` holds, for up to a second.
+    fn pollUntil(comptime done: fn () bool) bool {
+        for (0..100) |_| {
+            pumpkin.net.poll();
+            if (done()) return true;
+            pumpkin.io().sleep(.fromMilliseconds(10), .awake) catch {};
+        }
+        return false;
+    }
+};
+
+fn highLevelTcp() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const server = try high.listen(.{ .port = 0, .callbacks = .{ .on_line = hl.onServerLine } });
+    defer server.close();
+    const client = try high.connect("127.0.0.1", server.address().getPort(), .{ .callbacks = .{ .on_line = hl.onClientLine } });
+    defer client.close();
+
+    try client.send("ping\n");
+    if (!hl.pollUntil(struct {
+        fn f() bool {
+            return hl.client_got != null;
+        }
+    }.f)) return error.NoReply;
+    if (!std.mem.eql(u8, "ping", hl.server_got orelse "")) return error.WrongRequest;
+    if (!std.mem.eql(u8, "pong", hl.client_got.?)) return error.WrongReply;
+}
+
+fn highLevelReadLine() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const server = try high.listen(.{ .port = 0, .on_connect = hl.greet });
+    defer server.close();
+    const client = try high.connect("localhost", server.address().getPort(), .{});
+    defer client.close();
+
+    high.poll();
+    if (!std.mem.eql(u8, "hello", try client.readLine())) return error.WrongGreeting;
+}
+
+fn highLevelUdp() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const a = try high.udp(.{ .port = 0 });
+    defer a.close();
+    const b = try high.udp(.{ .port = 0, .on_datagram = hl.onDatagram });
+    defer b.close();
+
+    try a.sendTo(b.address(), "hi there");
+    if (!hl.pollUntil(struct {
+        fn f() bool {
+            return hl.datagram != null;
+        }
+    }.f)) return error.NoDatagram;
+    if (!std.mem.eql(u8, "hi there", hl.datagram.?)) return error.WrongDatagram;
+}
+
+fn highLevelClose() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const server = try high.listen(.{ .port = 0, .callbacks = .{ .on_close = hl.onClose } });
+    const client = try high.connect("127.0.0.1", server.address().getPort(), .{});
+    defer client.close();
+    high.poll();
+    if (server.connections.items.len != 1) return error.NotAccepted;
+    server.close();
+    high.poll();
+    if (hl.closes != 1) return error.CloseNotReported;
+    if (client.readLine()) |_| return error.StillOpen else |_| {}
+}
+
+fn highLevelIdlePoll() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const server = try high.listen(.{ .port = 0, .callbacks = .{ .on_line = hl.onServerLine } });
+    defer server.close();
+    const client = try high.connect("127.0.0.1", server.address().getPort(), .{ .callbacks = .{ .on_line = hl.onClientLine } });
+    defer client.close();
+    try client.send("ping\n");
+    if (!hl.pollUntil(struct {
+        fn f() bool {
+            return hl.client_got != null;
+        }
+    }.f)) return error.NoReply;
+
+    const io = pumpkin.io();
+    const start = std.Io.Clock.awake.now(io);
+    for (0..10) |_| high.poll();
+    if (start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 100) return error.PollBlocked;
+}
 
 comptime {
     pumpkin.register(NetTest);

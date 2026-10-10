@@ -13,10 +13,27 @@ const tcp = wasi.tcp;
 const udp = wasi.udp;
 const Pollable = wasi.poll.Pollable;
 
+const Accepted = struct { socket: tcp.TcpSocket, input: streams.InputStream, output: streams.OutputStream };
+const Datagram = struct { from: net.IpAddress, data: []u8 };
+
+/// `pending` holds what `ready` took in to find out whether anything is
+/// there. A pollable stays ready until a read comes up empty, so asking it
+/// alone would make the next read wait.
 const Entry = union(enum) {
-    stream: struct { socket: tcp.TcpSocket, input: streams.InputStream, output: streams.OutputStream },
-    listener: tcp.TcpSocket,
-    datagram: struct { socket: udp.UdpSocket, incoming: udp.IncomingDatagramStream, outgoing: udp.OutgoingDatagramStream },
+    stream: struct {
+        socket: tcp.TcpSocket,
+        input: streams.InputStream,
+        output: streams.OutputStream,
+        pending: std.ArrayList(u8) = .empty,
+        ended: bool = false,
+    },
+    listener: struct { socket: tcp.TcpSocket, pending: std.ArrayList(Accepted) = .empty },
+    datagram: struct {
+        socket: udp.UdpSocket,
+        incoming: udp.IncomingDatagramStream,
+        outgoing: udp.OutgoingDatagramStream,
+        pending: std.ArrayList(Datagram) = .empty,
+    },
 };
 
 /// Socket handles start here so they can't be mistaken for WASI file descriptors.
@@ -56,13 +73,56 @@ fn install(vtable: *Io.VTable) void {
 /// for a stream or a datagram for a UDP socket. Polling this from a task lets
 /// a plugin accept and receive without blocking the server.
 pub fn ready(handle: net.Socket.Handle) bool {
-    const pollable = switch (get(handle) orelse return false) {
-        .stream => |s| s.input.subscribe(),
-        .listener => |socket| socket.subscribe(),
-        .datagram => |d| d.incoming.subscribe(),
+    return switch (get(handle) orelse return false) {
+        .stream => |st| st.pending.items.len > 0 or st.ended or takeBytes(handle, st.input),
+        .listener => |l| l.pending.items.len > 0 or takeConnection(handle, l.socket),
+        .datagram => |d| d.pending.items.len > 0 or takeDatagrams(handle, d.incoming),
     };
-    defer pollable.deinit();
-    return pollable.ready();
+}
+
+// The take functions look the entry up again after calling the host, which
+// may run another callback of the plugin that adds sockets and moves entries.
+
+fn takeBytes(handle: net.Socket.Handle, input: streams.InputStream) bool {
+    const result = input.read(64 * 1024);
+    const st = &(entryOf(handle) orelse return false).stream;
+    switch (result) {
+        .ok => |bytes| {
+            if (bytes.len == 0) return false;
+            st.pending.appendSlice(abi.heap, bytes) catch @panic("OOM");
+        },
+        .err => |err| {
+            if (err == .last_operation_failed) err.last_operation_failed.deinit();
+            st.ended = true;
+        },
+    }
+    return true;
+}
+
+fn takeConnection(handle: net.Socket.Handle, socket: tcp.TcpSocket) bool {
+    const client, const input, const output = switch (socket.accept()) {
+        .ok => |accepted| accepted,
+        .err => return false,
+    };
+    client.keep();
+    input.keep();
+    output.keep();
+    const l = &(entryOf(handle) orelse return false).listener;
+    l.pending.append(abi.heap, .{ .socket = client, .input = input, .output = output }) catch @panic("OOM");
+    return true;
+}
+
+fn takeDatagrams(handle: net.Socket.Handle, incoming: udp.IncomingDatagramStream) bool {
+    const datagrams = switch (incoming.receive(16)) {
+        .ok => |datagrams| datagrams,
+        .err => return false,
+    };
+    const d = &(entryOf(handle) orelse return false).datagram;
+    for (datagrams) |datagram| {
+        const data = abi.heap.dupe(u8, datagram.data) catch @panic("OOM");
+        d.pending.append(abi.heap, .{ .from = fromWasiSocket(datagram.remote_address), .data = data }) catch @panic("OOM");
+    }
+    return datagrams.len > 0;
 }
 
 fn instanceNetwork() network.Network {
@@ -107,8 +167,13 @@ fn add(entry: Entry) net.Socket.Handle {
 }
 
 fn get(handle: net.Socket.Handle) ?Entry {
+    return (entryOf(handle) orelse return null).*;
+}
+
+fn entryOf(handle: net.Socket.Handle) ?*Entry {
     const i = std.math.sub(usize, @intCast(handle), first_handle) catch return null;
-    return if (i < entries.items.len) entries.items[i] else null;
+    if (i >= entries.items.len) return null;
+    return if (entries.items[i]) |*entry| entry else null;
 }
 
 fn toWasi(address: net.IpAddress) network.IpSocketAddress {
@@ -258,19 +323,24 @@ fn listenIp(_: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddres
         .err => address.*,
     };
     socket.keep();
-    return .{ .handle = add(.{ .listener = socket }), .address = local };
+    return .{ .handle = add(.{ .listener = .{ .socket = socket } }), .address = local };
 }
 
 fn accept(_: ?*anyopaque, handle: net.Socket.Handle, _: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket {
-    const listener = switch (get(handle) orelse return error.SocketNotListening) {
-        .listener => |socket| socket,
+    const listener = switch ((entryOf(handle) orelse return error.SocketNotListening).*) {
+        .listener => |*l| l,
         else => return error.SocketNotListening,
     };
+    if (listener.pending.items.len > 0) {
+        const accepted = listener.pending.orderedRemove(0);
+        return addAccepted(accepted.socket, accepted.input, accepted.output);
+    }
+    const server = listener.socket;
     const socket, const input, const output = while (true) {
-        switch (listener.accept()) {
+        switch (server.accept()) {
             .ok => |accepted| break accepted,
             .err => |code| switch (code) {
-                .would_block => wait(listener.subscribe()),
+                .would_block => wait(server.subscribe()),
                 .new_socket_limit, .out_of_memory => return error.SystemResources,
                 .invalid_state => return error.SocketNotListening,
                 .connection_aborted, .connection_reset => return error.ConnectionAborted,
@@ -279,13 +349,22 @@ fn accept(_: ?*anyopaque, handle: net.Socket.Handle, _: net.Server.AcceptOptions
         }
     };
 
-    const remote = switch (socket.remoteAddress()) {
-        .ok => |remote| fromWasiSocket(remote),
-        .err => return error.Unexpected,
-    };
     socket.keep();
     input.keep();
     output.keep();
+    return addAccepted(socket, input, output);
+}
+
+fn addAccepted(socket: tcp.TcpSocket, input: streams.InputStream, output: streams.OutputStream) net.Server.AcceptError!net.Socket {
+    const remote = switch (socket.remoteAddress()) {
+        .ok => |remote| fromWasiSocket(remote),
+        .err => {
+            input.deinit();
+            output.deinit();
+            socket.deinit();
+            return error.Unexpected;
+        },
+    };
     return .{
         .handle = add(.{ .stream = .{ .socket = socket, .input = input, .output = output } }),
         .address = remote,
@@ -367,10 +446,27 @@ fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Oper
 }
 
 fn receive(op: Io.Operation.NetReceive) Io.Operation.NetReceive.Result {
-    const incoming = switch (get(op.socket_handle) orelse return .{ error.SocketUnconnected, 0 }) {
-        .datagram => |d| d.incoming,
+    const socket = switch ((entryOf(op.socket_handle) orelse return .{ error.SocketUnconnected, 0 }).*) {
+        .datagram => |*d| d,
         else => return .{ error.SocketUnconnected, 0 },
     };
+    if (socket.pending.items.len > 0) {
+        var used: usize = 0;
+        var count: usize = 0;
+        while (count < op.message_buffer.len and socket.pending.items.len > 0) : (count += 1) {
+            const datagram = socket.pending.orderedRemove(0);
+            defer abi.heap.free(datagram.data);
+            const message = &op.message_buffer[count];
+            const n = @min(datagram.data.len, op.data_buffer.len - used);
+            @memcpy(op.data_buffer[used..][0..n], datagram.data[0..n]);
+            message.from = datagram.from;
+            message.data = op.data_buffer[used..][0..n];
+            message.flags = .{ .eor = true, .trunc = n < datagram.data.len, .ctrunc = false, .oob = false, .errqueue = false };
+            used += n;
+        }
+        return .{ null, count };
+    }
+    const incoming = socket.incoming;
     const datagrams = while (true) {
         switch (incoming.receive(op.message_buffer.len)) {
             .ok => |datagrams| if (datagrams.len > 0) break datagrams else wait(incoming.subscribe()),
@@ -391,14 +487,21 @@ fn receive(op: Io.Operation.NetReceive) Io.Operation.NetReceive.Result {
 }
 
 fn read(_: ?*anyopaque, handle: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
-    const input = switch (get(handle) orelse return error.SocketUnconnected) {
-        .stream => |s| s.input,
+    const stream = switch ((entryOf(handle) orelse return error.SocketUnconnected).*) {
+        .stream => |*s| s,
         else => return error.SocketUnconnected,
     };
     var len: usize = 0;
     for (data) |buffer| len += buffer.len;
 
-    const bytes = switch (input.blockingRead(len)) {
+    if (stream.pending.items.len > 0) {
+        const n = copyInto(data, stream.pending.items);
+        stream.pending.replaceRangeAssumeCapacity(0, n, &.{});
+        return n;
+    }
+    if (stream.ended) return 0;
+
+    const bytes = switch (stream.input.blockingRead(len)) {
         .ok => |bytes| bytes,
         .err => |err| switch (err) {
             .closed => return 0,
@@ -408,13 +511,17 @@ fn read(_: ?*anyopaque, handle: net.Socket.Handle, data: [][]u8) net.Stream.Read
             },
         },
     };
+    return copyInto(data, bytes);
+}
+
+fn copyInto(data: [][]u8, bytes: []const u8) usize {
     var copied: usize = 0;
     for (data) |buffer| {
         const n = @min(buffer.len, bytes.len - copied);
         @memcpy(buffer[0..n], bytes[copied..][0..n]);
         copied += n;
     }
-    return bytes.len;
+    return copied;
 }
 
 fn fill(buffer: []u8, len: usize, bytes: []const u8) usize {
@@ -458,12 +565,26 @@ fn close(_: ?*anyopaque, handles: []const net.Socket.Handle) void {
         entries.items[@intCast(handle - first_handle)] = null;
         switch (entry) {
             .stream => |s| {
+                var pending = s.pending;
+                pending.deinit(abi.heap);
                 s.input.deinit();
                 s.output.deinit();
                 s.socket.deinit();
             },
-            .listener => |socket| socket.deinit(),
+            .listener => |l| {
+                var pending = l.pending;
+                for (pending.items) |accepted| {
+                    accepted.input.deinit();
+                    accepted.output.deinit();
+                    accepted.socket.deinit();
+                }
+                pending.deinit(abi.heap);
+                l.socket.deinit();
+            },
             .datagram => |d| {
+                var pending = d.pending;
+                for (pending.items) |datagram| abi.heap.free(datagram.data);
+                pending.deinit(abi.heap);
                 d.incoming.deinit();
                 d.outgoing.deinit();
                 d.socket.deinit();
