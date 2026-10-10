@@ -33,11 +33,50 @@ pub fn build(b: *std.Build) void {
     _ = pumpkin_api.addPlugin(b, b.dependency("pumpkin_api_zig", .{}), .{
         .name = "my-plugin",
         .root_source_file = b.path("src/main.zig"),
+        .imports = &.{},
     });
 }
 ```
 
 `zig build` produces `zig-out/my-plugin.wasm`. Copy it into the server's `plugins` folder and restart the server.
+
+### Adding Additional Imports
+To add additional imports use the .imports field.
+```zig
+const std = @import("std");
+const pumpkin_api = @import("pumpkin_api_zig");
+
+pub fn build(b: *std.Build) void {
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+
+    const optimize = b.standardOptimizeOption(.{});
+
+    const api = b.dependency("pumpkin_api_zig", .{});
+
+    const sqliteDep = b.dependency("sqlite", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    _ = pumpkin_api.addPlugin(b, api, .{
+        .name = "my-plugin",
+        .root_source_file = b.path("src/main.zig"),
+        .optimize = optimize,
+        .imports = &.{
+            .{
+                .name = "sqlite",
+                .module = sqliteDep.module("sqlite"),
+            },
+        },
+    });
+}
+```
+Create the normal zig dependency then pass the name and module through in the imports field.
+
+C Based Libraries and Libraries that require `linkLibC` will not work when compiling to `wasm32-wasi`.
 
 ## A plugin
 

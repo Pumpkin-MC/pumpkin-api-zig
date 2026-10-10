@@ -4,6 +4,7 @@ pub const PluginOptions = struct {
     name: []const u8,
     root_source_file: std.Build.LazyPath,
     optimize: std.builtin.OptimizeMode = .ReleaseSmall,
+    imports: []const std.Build.Module.Import = &.{},
 };
 
 const wasi: std.Target.Query = .{ .cpu_arch = .wasm32, .os_tag = .wasi };
@@ -26,14 +27,21 @@ fn addPluginFrom(b: *std.Build, api: *std.Build, options: PluginOptions) *std.Bu
         .optimize = options.optimize,
     });
 
+    const plugin_module = b.createModule(.{
+        .root_source_file = options.root_source_file,
+        .target = target,
+        .optimize = options.optimize,
+    });
+
+    plugin_module.addImport("pumpkin", pumpkin);
+
+    for (options.imports) |import| {
+        plugin_module.addImport(import.name, import.module);
+    }
+
     const core = b.addExecutable(.{
         .name = options.name,
-        .root_module = b.createModule(.{
-            .root_source_file = options.root_source_file,
-            .target = target,
-            .optimize = options.optimize,
-            .imports = &.{.{ .name = "pumpkin", .module = pumpkin }},
-        }),
+        .root_module = plugin_module,
     });
     core.entry = .disabled;
     core.rdynamic = true;
