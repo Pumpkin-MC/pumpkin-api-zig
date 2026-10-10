@@ -17,6 +17,7 @@ pub const abi = @import("abi.zig");
 pub const cmd = @import("cmd.zig");
 pub const msg = @import("msg.zig");
 pub const menu = @import("menu.zig");
+const net_io = @import("net.zig");
 const wit = @import("wit.zig");
 
 pub const advancement = wit.advancement;
@@ -88,10 +89,19 @@ pub const Metadata = struct {
 };
 
 var threaded: std.Io.Threaded = .init_single_threaded;
+var vtable: ?std.Io.VTable = null;
 
-/// The `std.Io` to pass to file calls.
+pub const net = struct {
+    pub const ready = net_io.ready;
+};
+
+/// The `std.Io` to pass to file and network calls.
 pub fn io() std.Io {
-    return threaded.io();
+    if (vtable == null) {
+        vtable = threaded.io().vtable.*;
+        net_io.install(&vtable.?);
+    }
+    return .{ .userdata = &threaded, .vtable = &vtable.? };
 }
 
 /// Plug this into `std_options.logFn` to route `std.log` to the server console.

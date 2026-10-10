@@ -62,7 +62,13 @@ fn addPluginFrom(b: *std.Build, api: *std.Build, options: PluginOptions) Plugin 
     embed.addFileArg(api.path("src/plugin.wit"));
     embed.addFileArg(core.getEmittedBin());
     embed.addArg("-o");
-    const embedded = embed.addOutputFileArg("embedded.wasm");
+    const with_plugin = embed.addOutputFileArg("plugin.wasm");
+
+    const embed_wasi = b.addSystemCommand(&.{ "wasm-tools", "component", "embed", "--world", "sockets" });
+    embed_wasi.addFileArg(api.path("src/wasi/wasi.wit"));
+    embed_wasi.addFileArg(with_plugin);
+    embed_wasi.addArg("-o");
+    const embedded = embed_wasi.addOutputFileArg("embedded.wasm");
 
     // Zig emits WASI preview 1, the server provides preview 2.
     const new = b.addSystemCommand(&.{ "wasm-tools", "component", "new", "--adapt" });
@@ -81,6 +87,7 @@ pub fn build(b: *std.Build) void {
         .name = "pumpkin-plugin-example",
         .root_source_file = b.path("example/src/main.zig"),
     });
+    _ = addPluginFrom(b, b, .{ .name = "nettest", .root_source_file = b.path("tests/network.zig") });
 
     const test_step = b.step("test", "Run unit tests");
     for ([_][]const u8{ "src/abi.zig", "src/cmd.zig", "tools/gen.zig" }) |path| {
@@ -103,18 +110,9 @@ pub fn build(b: *std.Build) void {
     });
     b.step("check", "Compile every generated binding").dependOn(&check.step);
 
-    // zig build gen: src/wit/ and src/plugin.wit from the wit submodule.
-    // Directory inputs aren't hashed, so these always rerun.
-    const dump = b.addSystemCommand(&.{ "wasm-tools", "component", "wit", "--json" });
-    dump.addDirectoryArg(b.path("wit/v0.1"));
-    dump.has_side_effects = true;
-    const json = dump.captureStdOut(.{});
-
-    const merge = b.addSystemCommand(&.{ "wasm-tools", "component", "wit", "-o", "src/plugin.wit" });
-    merge.addDirectoryArg(b.path("wit/v0.1"));
-    merge.setCwd(b.path("."));
-    merge.has_side_effects = true;
-
+    // zig build gen: src/wit/ and src/plugin.wit from the wit submodule,
+    // src/wasi/ from wasi/. Directory inputs aren't hashed, so these always
+    // rerun.
     const generator = b.addExecutable(.{
         .name = "gen",
         .root_module = b.createModule(.{
@@ -122,16 +120,37 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
         }),
     });
-    const generate = b.addRunArtifact(generator);
-    generate.addFileArg(json);
-    generate.addArg("src");
-    generate.setCwd(b.path("."));
-    generate.has_side_effects = true;
+    const fmt = b.addFmt(.{ .paths = &.{ "src/wit", "src/wit.zig", "src/wasi", "src/wasi.zig" } });
 
-    const fmt = b.addFmt(.{ .paths = &.{ "src/wit", "src/wit.zig" } });
-    fmt.step.dependOn(&generate.step);
-    fmt.step.dependOn(&merge.step);
-    b.step("gen", "Regenerate src/wit from wit/v0.1").dependOn(&fmt.step);
+    const wasi_license = b.addUpdateSourceFiles();
+    wasi_license.addCopyFileToSource(b.path("wasi/LICENSE.md"), "src/wasi/LICENSE.md");
+
+    const sources = [_]struct { dir: std.Build.LazyPath, name: []const u8, wit: []const u8 }{
+        .{ .dir = b.path("wit/v0.1"), .name = "wit", .wit = "src/plugin.wit" },
+        .{ .dir = b.path("wasi"), .name = "wasi", .wit = "src/wasi/wasi.wit" },
+    };
+    for (sources) |source| {
+        const dump = b.addSystemCommand(&.{ "wasm-tools", "component", "wit", "--json" });
+        dump.addDirectoryArg(source.dir);
+        dump.has_side_effects = true;
+
+        const merge = b.addSystemCommand(&.{ "wasm-tools", "component", "wit", "-o", source.wit });
+        merge.addDirectoryArg(source.dir);
+        merge.setCwd(b.path("."));
+        merge.has_side_effects = true;
+
+        const generate = b.addRunArtifact(generator);
+        generate.addFileArg(dump.captureStdOut(.{}));
+        generate.addArgs(&.{ "src", source.name });
+        generate.setCwd(b.path("."));
+        generate.has_side_effects = true;
+
+        merge.step.dependOn(&generate.step);
+        fmt.step.dependOn(&merge.step);
+        if (std.mem.eql(u8, source.name, "wasi")) wasi_license.step.dependOn(&generate.step);
+    }
+    fmt.step.dependOn(&wasi_license.step);
+    b.step("gen", "Regenerate the bindings from wit/v0.1 and wasi").dependOn(&fmt.step);
 
     // zig build fixtures: rewrites what the generator test compares against.
     // demo.json comes from `wasm-tools component wit tools/testdata/wit --json`.

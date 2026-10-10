@@ -1,9 +1,10 @@
 //! Not part of the package. Zig only analyzes what gets used, so a plugin build
-//! never looks at most of src/wit. This takes the address of every generated
+//! never looks at most of src/wit and src/wasi. This takes the address of every generated
 //! function to get all of them compiled, see `zig build check`.
 
 const std = @import("std");
 const wit = @import("wit.zig");
+const wasi = @import("wasi.zig");
 
 fn collect(comptime T: type) []const *const anyopaque {
     var out: []const *const anyopaque = &.{};
@@ -24,7 +25,7 @@ fn collect(comptime T: type) []const *const anyopaque {
 
 const all = blk: {
     @setEvalBranchQuota(10_000_000);
-    const list = collect(wit);
+    const list = collect(wit) ++ collect(wasi);
     break :blk list[0..list.len].*;
 };
 
