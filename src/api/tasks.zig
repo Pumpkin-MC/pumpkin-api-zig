@@ -109,7 +109,7 @@ fn schedule(delay: Duration, period: ?Duration, comptime handler: anytype, data:
         .generation = s.generation +% 1,
         .used = true,
         .repeating = period != null,
-        .data = stored,
+        .data = @ptrCast(stored),
         .run = glue.run,
         .destroy = glue.destroy,
     };
