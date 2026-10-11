@@ -4,7 +4,7 @@
 //! What's written by hand here is the glue a plugin needs to get going:
 //! `register`, typed event and task handlers, `cmd` for commands, `msg` for
 //! text components, `menu` for inventory menus, `http` and `net` for
-//! networking and `std.log` support.
+//! networking, `config` for config files and `std.log` support.
 //!
 //! Whatever the API hands out is only good until the current callback returns:
 //! strings, slices and records live in a per-call arena and handles are
@@ -20,6 +20,7 @@ pub const msg = @import("api/msg.zig");
 pub const menu = @import("api/menu.zig");
 pub const http = @import("api/http.zig");
 pub const net = @import("api/net.zig");
+pub const config = @import("api/config.zig");
 const runtime_io = @import("runtime/io.zig");
 const wit = @import("bindings/pumpkin.zig");
 
@@ -340,4 +341,5 @@ fn goalFromId(id: u32) *const AiGoal {
 test {
     _ = abi;
     _ = cmd;
+    _ = config;
 }
