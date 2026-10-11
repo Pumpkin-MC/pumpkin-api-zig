@@ -31,7 +31,7 @@ const Hello = struct {
     }};
 
     pub fn onLoad(_: pumpkin.Context) !void {
-        std.log.info("Hello from Zig!", .{});
+        std.log.info("Hello from Zig, built with pumpkin-api-zig {s}!", .{pumpkin.version});
     }
 
     fn onJoin(_: pumpkin.Server, ev: *pumpkin.EventData(.player_join_event)) void {

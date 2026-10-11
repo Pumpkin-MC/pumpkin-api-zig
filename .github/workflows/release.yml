@@ -1,0 +1,70 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Set up wasm-tools
+        uses: bytecodealliance/actions/wasm-tools/setup@v1
+        with:
+          version: "1.259.0"
+
+      - name: Tag matches build.zig.zon
+        run: |
+          set -eux
+          version=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
+          test "v$version" = "$GITHUB_REF_NAME"
+
+      - name: Test
+        run: |
+          set -eux
+          zig build test
+          zig build check
+          zig build gen
+          git diff --exit-code -- src/bindings
+
+      - name: Build examples
+        run: |
+          set -eux
+          zig build
+          for plugin in zig-out/*.wasm; do wasm-tools validate "$plugin"; done
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          wit_commit=$(git -C wit rev-parse HEAD)
+          wit_short=$(git -C wit rev-parse --short HEAD)
+          wit_version=$(sed -n 's/^package pumpkin:plugin@\(.*\);$/\1/p' src/bindings/plugin.wit | head -1)
+          cat > notes.md <<EOF
+          Built against the Pumpkin plugin API \`pumpkin:plugin@${wit_version}\` at [pumpkin-plugin-wit@${wit_short}](https://github.com/Pumpkin-MC/pumpkin-plugin-wit/commit/${wit_commit}). Plugins built with this release load on Pumpkin builds that include that revision of the plugin API.
+
+          Install it with:
+
+          \`\`\`sh
+          zig fetch --save git+https://github.com/${GITHUB_REPOSITORY}#${GITHUB_REF_NAME}
+          \`\`\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" zig-out/*.wasm \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --generate-notes

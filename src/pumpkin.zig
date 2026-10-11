@@ -69,6 +69,9 @@ pub const text = wit.text;
 pub const uuid = wit.uuid;
 pub const world = wit.world;
 
+/// The version of these bindings the plugin was built with.
+pub const version: []const u8 = @import("build_options").version;
+
 pub const Context = context.Context;
 pub const Server = server.Server;
 pub const Player = player.Player;

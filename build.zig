@@ -1,4 +1,11 @@
 const std = @import("std");
+const manifest: struct {
+    name: @EnumLiteral(),
+    version: []const u8,
+    fingerprint: u64,
+    minimum_zig_version: []const u8,
+    paths: []const []const u8,
+} = @import("build.zig.zon");
 
 pub const PluginOptions = struct {
     name: []const u8,
@@ -12,6 +19,12 @@ pub const Plugin = struct {
     module: *std.Build.Module,
     install: *std.Build.Step.InstallFile,
 };
+
+fn buildOptions(b: *std.Build) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", manifest.version);
+    return options;
+}
 
 /// The target plugins and their dependencies are built for.
 pub fn target(b: *std.Build) std.Build.ResolvedTarget {
@@ -35,6 +48,7 @@ fn addPluginFrom(b: *std.Build, api: *std.Build, options: PluginOptions) Plugin 
         .target = wasi,
         .optimize = options.optimize,
     });
+    pumpkin.addOptions("build_options", buildOptions(api));
 
     const plugin_module = b.createModule(.{
         .root_source_file = options.root_source_file,
@@ -99,6 +113,7 @@ pub fn build(b: *std.Build) void {
                 .target = b.graph.host,
             }),
         });
+        tests.root_module.addOptions("build_options", buildOptions(b));
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
