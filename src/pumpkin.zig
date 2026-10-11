@@ -213,6 +213,16 @@ fn registerEvents(comptime Plugin: type, ctx: Context) void {
 ///
 /// Events and commands are registered before `onLoad` runs.
 pub fn register(comptime Plugin: type) void {
+    if (@hasDecl(Plugin, "commands")) {
+        @setEvalBranchQuota(100_000);
+        const specs: []const cmd.Spec = Plugin.commands;
+        for (specs) |spec| {
+            if (cmd.findUnsupported(spec.then)) |node| @compileError(std.fmt.comptimePrint(
+                "/{s}: the server doesn't support the argument type .{s} of '{s}', see cmd.isSupported",
+                .{ spec.names[0], @tagName(node.kind.argument.type), node.kind.argument.name },
+            ));
+        }
+    }
     const glue = struct {
         fn initPlugin() void {}
 

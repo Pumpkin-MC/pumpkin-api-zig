@@ -41,7 +41,7 @@ const Tasks = struct {
         .permission = "example-tasks:command.remind",
         .then = &.{
             .argument("seconds", .{ .integer = .{ 1, 3600 } }, .{
-                .then = &.{.argument("message", .message, .{ .run = cmd.typed(startReminder) })},
+                .then = &.{.argument("message", .{ .string = .greedy }, .{ .run = cmd.typed(startReminder) })},
             }),
         },
     } };

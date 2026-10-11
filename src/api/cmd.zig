@@ -75,7 +75,33 @@ pub const Spec = struct {
     then: []const Node = &.{},
 };
 
-pub fn register(ctx: Context, spec: Spec) error{PermissionRejected}!void {
+/// Reports whether the server can register an argument of this type. The
+/// v0.1 plugin API rejects the others, such as `.message`; to read the rest of
+/// the line, use `.{ .string = .greedy }` instead.
+pub fn isSupported(arg_type: ArgumentType) bool {
+    return switch (arg_type) {
+        .bool, .float, .double, .integer, .long, .string, .entities, .entity, .players, .game_profile => true,
+        .block_pos, .position3d, .position2d, .block_state, .block_predicate, .item, .item_predicate => true,
+        .component, .rotation, .resource_location, .resource, .entity_anchor, .gamemode, .difficulty, .time => true,
+        else => false,
+    };
+}
+
+/// Returns the first argument under `nodes` whose type the server can't register.
+pub fn findUnsupported(nodes: []const Node) ?Node {
+    for (nodes) |node| {
+        if (node.kind == .argument and !isSupported(node.kind.argument.type)) return node;
+        if (findUnsupported(node.options.then)) |found| return found;
+    }
+    return null;
+}
+
+pub fn register(ctx: Context, spec: Spec) error{ PermissionRejected, UnsupportedArgument }!void {
+    if (findUnsupported(spec.then)) |node| {
+        const arg = node.kind.argument;
+        std.log.err("/{s}: the server doesn't support the argument type .{t} of '{s}'", .{ spec.names[0], arg.type, arg.name });
+        return error.UnsupportedArgument;
+    }
     switch (ctx.registerPermission(.{
         .node = spec.permission,
         .description = spec.description,
