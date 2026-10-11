@@ -97,13 +97,12 @@ fn addPluginFrom(b: *std.Build, api: *std.Build, options: PluginOptions) Plugin 
 }
 
 pub fn build(b: *std.Build) void {
-    for ([_][]const u8{ "hello", "heal", "menu", "config", "dns", "http", "https", "tcp-server", "udp", "tasks", "items", "store" }) |example| {
+    for ([_][]const u8{ "hello", "heal", "menu", "config", "dns", "http", "https", "tcp-server", "udp", "tasks", "items", "store", "nettest" }) |example| {
         _ = addPluginFrom(b, b, .{
             .name = b.fmt("example-{s}", .{example}),
             .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
         });
     }
-    _ = addPluginFrom(b, b, .{ .name = "nettest", .root_source_file = b.path("tests/network.zig") });
 
     const test_step = b.step("test", "Run unit tests");
     for ([_][]const u8{ "src/pumpkin.zig", "tools/gen.zig" }) |path| {

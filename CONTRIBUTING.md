@@ -11,7 +11,7 @@ git clone --recurse-submodules https://github.com/Pumpkin-MC/pumpkin-api-zig
 ```
 
 ```sh
-zig build        # builds the examples and tests/network.zig into zig-out/
+zig build        # builds the examples into zig-out/
 zig build test   # unit tests for the ABI layer, the helpers and the generator
 zig build check  # compiles every generated binding
 zig build gen    # regenerates src/bindings/
@@ -25,7 +25,7 @@ To try a change, copy the plugins from `zig-out/` into the `plugins` folder of a
 - `src/api/` holds the hand-written helpers: `cmd`, `msg`, `menu`, `item`, `http`, `net`, `config`, `store` and `tasks`.
 - `src/runtime/` holds the canonical ABI layer and the `std.Io` behind `pumpkin.io()`.
 - `src/bindings/` holds the generated bindings. Don't edit them by hand: change `tools/gen.zig` or the WIT and run `zig build gen`.
-- `examples/` has one plugin per topic, and `tests/network.zig` is a plugin that tests networking against a real server with `/nettest`.
+- `examples/` has one plugin per topic. `examples/nettest.zig` runs every networking path against a real server with `/nettest`.
 
 The README's [Working on the bindings](README.md#working-on-the-bindings) section explains where the WIT and WASI definitions come from.
 

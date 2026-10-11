@@ -12,7 +12,7 @@ pub const std_options: std.Options = .{ .logFn = pumpkin.logFn };
 
 const NetTest = struct {
     pub const metadata: pumpkin.Metadata = .{
-        .name = "nettest",
+        .name = "example-nettest",
         .version = "0.1.0",
         .authors = &.{"Pumpkin"},
         .description = "Tests the networking support with /nettest.",
@@ -22,7 +22,7 @@ const NetTest = struct {
     pub const commands: []const cmd.Spec = &.{.{
         .names = &.{"nettest"},
         .description = "Runs the networking tests.",
-        .permission = "nettest:command.nettest",
+        .permission = "example-nettest:command.nettest",
         .default = .{ .op = .two },
         .run = run,
     }};

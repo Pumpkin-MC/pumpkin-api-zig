@@ -138,6 +138,7 @@ comptime {
 | [`tasks`](examples/tasks.zig) | Delayed and repeating tasks that carry a value |
 | [`items`](examples/items.zig) | Building, editing and recognizing items, and giving and taking them |
 | [`store`](examples/store.zig) | Data kept for every player in a file of its own |
+| [`nettest`](examples/nettest.zig) | Runs every networking path with `/nettest` and reports each one |
 
 ## Commands
 

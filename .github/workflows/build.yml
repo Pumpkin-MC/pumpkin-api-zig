@@ -35,7 +35,7 @@ jobs:
           version: "1.259.0"
 
       - name: Format
-        run: zig fmt --check build.zig src tools examples tests
+        run: zig fmt --check build.zig src tools examples
 
       - name: Test
         run: zig build test --summary all
