@@ -4,8 +4,8 @@
 //! What's written by hand here is the glue a plugin needs to get going:
 //! `register`, typed event and task handlers, `cmd` for commands, `msg` for
 //! text components, `menu` for inventory menus, `http` and `net` for
-//! networking, `config` for config files, `tasks` for scheduled work and
-//! `std.log` support.
+//! networking, `config` for config files, `tasks` for scheduled work, `item` for
+//! item stacks and `std.log` support.
 //!
 //! Whatever the API hands out is only good until the current callback returns:
 //! strings, slices and records live in a per-call arena and handles are
@@ -23,6 +23,7 @@ pub const http = @import("api/http.zig");
 pub const net = @import("api/net.zig");
 pub const config = @import("api/config.zig");
 pub const tasks = @import("api/tasks.zig");
+pub const item = @import("api/item.zig");
 const runtime_io = @import("runtime/io.zig");
 const wit = @import("bindings/pumpkin.zig");
 
@@ -70,6 +71,9 @@ pub const status_effect = wit.status_effect;
 pub const text = wit.text;
 pub const uuid = wit.uuid;
 pub const world = wit.world;
+
+/// The plugin's name from its metadata, set when the plugin starts.
+pub var plugin_name: []const u8 = "";
 
 /// The version of these bindings the plugin was built with.
 pub const version: []const u8 = @import("build_options").version;
@@ -224,7 +228,9 @@ pub fn register(comptime Plugin: type) void {
         }
     }
     const glue = struct {
-        fn initPlugin() void {}
+        fn initPlugin() void {
+            plugin_name = Plugin.metadata.name;
+        }
 
         fn getMetadata() wit.metadata.PluginMetadata {
             const meta: Metadata = Plugin.metadata;

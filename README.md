@@ -136,6 +136,7 @@ comptime {
 | [`tcp-server`](examples/tcp-server.zig) | A TCP server that bridges the chat, polled from a task |
 | [`udp`](examples/udp.zig) | Receiving and answering UDP datagrams |
 | [`tasks`](examples/tasks.zig) | Delayed and repeating tasks that carry a value |
+| [`items`](examples/items.zig) | Building, editing and recognizing items, and giving and taking them |
 
 ## Commands
 
