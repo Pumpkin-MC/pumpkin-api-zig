@@ -135,6 +135,7 @@ comptime {
 | [`https`](examples/https.zig) | HTTPS with `std.http.Client` |
 | [`tcp-server`](examples/tcp-server.zig) | A TCP server that bridges the chat, polled from a task |
 | [`udp`](examples/udp.zig) | Receiving and answering UDP datagrams |
+| [`tasks`](examples/tasks.zig) | Delayed and repeating tasks that carry a value |
 
 ## Commands
 

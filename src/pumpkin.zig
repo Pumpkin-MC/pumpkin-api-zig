@@ -4,7 +4,8 @@
 //! What's written by hand here is the glue a plugin needs to get going:
 //! `register`, typed event and task handlers, `cmd` for commands, `msg` for
 //! text components, `menu` for inventory menus, `http` and `net` for
-//! networking, `config` for config files and `std.log` support.
+//! networking, `config` for config files, `tasks` for scheduled work and
+//! `std.log` support.
 //!
 //! Whatever the API hands out is only good until the current callback returns:
 //! strings, slices and records live in a per-call arena and handles are
@@ -21,6 +22,7 @@ pub const menu = @import("api/menu.zig");
 pub const http = @import("api/http.zig");
 pub const net = @import("api/net.zig");
 pub const config = @import("api/config.zig");
+pub const tasks = @import("api/tasks.zig");
 const runtime_io = @import("runtime/io.zig");
 const wit = @import("bindings/pumpkin.zig");
 
@@ -236,6 +238,7 @@ pub fn register(comptime Plugin: type) void {
         }
 
         fn onUnload(ctx: Context) abi.Result(void, []const u8) {
+            defer tasks.cancelAll();
             defer net.closeAll();
             defer http.deinit();
             return lifecycle("onUnload", ctx);
@@ -281,6 +284,7 @@ pub fn register(comptime Plugin: type) void {
         }
 
         fn handleTask(id: u32, srv: Server) void {
+            if (id & tasks.id_bit != 0) return tasks.dispatch(id, srv);
             handlerFromId(TaskHandler, id)(srv);
         }
 
