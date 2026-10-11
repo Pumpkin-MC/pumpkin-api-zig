@@ -1,0 +1,22 @@
+name: Spelling
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CLICOLOR: 1
+
+jobs:
+  spelling:
+    name: Spell check with typos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Spell check
+        uses: crate-ci/typos@v1.50.1

@@ -1,0 +1,3 @@
+[files]
+# Generated bindings and files that come from other projects.
+extend-exclude = ["src/bindings/", "tools/testdata/", "wit/", "wasi/", "adapter/"]

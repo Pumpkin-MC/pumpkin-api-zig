@@ -61,5 +61,5 @@ jobs:
             echo "already up to date"
             exit 0
           fi
-          git commit -m "Sync to Pumpkin-MC/pumpkin-plugin-wit@${witCommit}"
+          git commit -m "chore(wit): sync to Pumpkin-MC/pumpkin-plugin-wit@${witCommit}"
           git push
