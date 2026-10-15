@@ -197,7 +197,7 @@ fn registerEvents(comptime Plugin: type, ctx: Context) void {
     const table = Plugin.events;
     inline for (@typeInfo(@TypeOf(table)).@"struct".fields) |field| {
         if (!@hasField(EventType, field.name)) @compileError("no event called '" ++ field.name ++ "'");
-            const event_type = @field(EventType, field.name);
+        const event_type = @field(EventType, field.name);
         const entry = @field(table, field.name);
         if (@typeInfo(@TypeOf(entry)) == .@"fn") {
             on(ctx, event_type, entry, .{});
