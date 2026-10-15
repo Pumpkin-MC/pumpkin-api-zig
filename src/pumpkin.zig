@@ -196,8 +196,8 @@ pub fn runEvery(comptime handler: TaskHandler, delay_ticks: u64, period_ticks: u
 fn registerEvents(comptime Plugin: type, ctx: Context) void {
     const table = Plugin.events;
     inline for (@typeInfo(@TypeOf(table)).@"struct".fields) |field| {
-        const event_type = comptime std.meta.stringToEnum(EventType, field.name) orelse
-            @compileError("no event called '" ++ field.name ++ "'");
+        if (!@hasField(EventType, field.name)) @compileError("no event called '" ++ field.name ++ "'");
+            const event_type = @field(EventType, field.name);
         const entry = @field(table, field.name);
         if (@typeInfo(@TypeOf(entry)) == .@"fn") {
             on(ctx, event_type, entry, .{});
