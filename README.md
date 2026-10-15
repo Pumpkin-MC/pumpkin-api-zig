@@ -12,7 +12,7 @@ This package provides Zig bindings for building Pumpkin plugins using WebAssembl
 Add a release of the package to your project:
 
 ```sh
-zig fetch --save git+https://github.com/Pumpkin-MC/pumpkin-api-zig#v0.1.0
+zig fetch --save git+https://github.com/Pumpkin-MC/pumpkin-api-zig#v0.1.1
 ```
 
 The [releases](https://github.com/Pumpkin-MC/pumpkin-api-zig/releases) list every version, and to update you run the command again with the new one. `main` is where development happens and follows the latest plugin API every day, so only use it if you need something that isn't released yet. If you are working on the API itself, point the dependency at a local checkout instead:
