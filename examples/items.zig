@@ -109,10 +109,12 @@ const Items = struct {
 
     fn trade(sender: cmd.Sender, _: pumpkin.Server, _: cmd.Args) cmd.Result {
         const player = sender.asPlayer() orelse return cmd.fail("only players can trade");
+        const diamond = item.build(.{ .id = "minecraft:diamond" });
+        if (item.room(player, diamond) == 0) return cmd.fail("you have no room for a diamond");
         if (!item.take(player, .{ .id = "minecraft:bread" }, 5)) {
             return cmd.fail("you need 5 bread");
         }
-        _ = item.give(player, item.build(.{ .id = "minecraft:diamond" }));
+        _ = item.give(player, diamond);
         sender.sendMessage(msg.fmt(.aqua, "Traded 5 bread for a diamond, {d} bread left.", .{
             item.count(player, .{ .id = "minecraft:bread" }),
         }));

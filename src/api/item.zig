@@ -48,6 +48,9 @@ pub const Modifier = struct {
     amount: f64,
     operation: Operation = .add,
     slot: Slot = .main_hand,
+    /// Null makes it "<plugin>:<attribute>". Modifiers with the same id
+    /// replace each other, so give each one of an attribute its own.
+    id: ?[]const u8 = null,
 };
 
 pub const Spec = struct {
@@ -57,6 +60,9 @@ pub const Spec = struct {
     name: ?[]const msg.Span = null,
     /// The lore, one list of spans per line.
     lore: []const []const msg.Span = &.{},
+    /// Whether the name and lore are italic where their spans don't say, as
+    /// vanilla shows custom names.
+    italic: bool = false,
     enchants: []const struct { Enchantment, u32 } = &.{},
     /// Enchantments added by data packs, given by their id.
     custom_enchants: []const struct { []const u8, u32 } = &.{},
@@ -77,13 +83,13 @@ pub const Spec = struct {
     data: []const Data = &.{},
 };
 
-/// Builds the item described by `spec`. Names and lore aren't italic unless
-/// a span asks for it, unlike vanilla custom names.
+/// Builds the item described by `spec`.
 pub fn build(spec: Spec) ItemStack {
     const stack: ItemStack = .init(spec.id, spec.count);
     edit(stack, .{
         .name = spec.name,
         .add_lore = spec.lore,
+        .italic = spec.italic,
         .enchants = spec.enchants,
         .custom_enchants = spec.custom_enchants,
         .modifiers = spec.modifiers,
@@ -108,6 +114,8 @@ pub const Edit = struct {
     lore: ?[]const []const msg.Span = null,
     /// Adds lines after the existing lore.
     add_lore: []const []const msg.Span = &.{},
+    /// Works as in `Spec`, for the name and lore set by this edit.
+    italic: bool = false,
     /// Adds enchantments or changes their level. Level 0 removes one.
     enchants: []const struct { Enchantment, u32 } = &.{},
     custom_enchants: []const struct { []const u8, u32 } = &.{},
@@ -131,13 +139,13 @@ pub const Edit = struct {
 /// so put it back afterwards, or use `editHeld` for the main hand.
 pub fn edit(stack: ItemStack, changes: Edit) void {
     if (changes.count) |n| stack.setCount(n);
-    if (changes.name) |name| stack.setCustomName(upright(name));
+    if (changes.name) |name| stack.setCustomName(styled(name, changes.italic));
     if (changes.lore) |lore| {
         const lines = pumpkin.abi.arena().alloc(TextComponent, lore.len) catch @panic("OOM");
-        for (lines, lore) |*line, spans| line.* = upright(spans);
+        for (lines, lore) |*line, spans| line.* = styled(spans, changes.italic);
         stack.setLore(lines);
     }
-    for (changes.add_lore) |line| stack.addLore(upright(line));
+    for (changes.add_lore) |line| stack.addLore(styled(line, changes.italic));
     for (changes.enchants) |e| {
         if (e[1] == 0) stack.removeEnchantment(e[0]) else stack.addEnchantment(e[0], e[1]);
     }
@@ -146,7 +154,7 @@ pub fn edit(stack: ItemStack, changes: Edit) void {
     }
     for (changes.remove_modifiers) |attribute| stack.removeAttributeModifiers(attribute);
     for (changes.modifiers) |m| {
-        const id = std.fmt.allocPrint(pumpkin.abi.arena(), "{s}:{t}", .{ pumpkin.plugin_name, m.attribute }) catch @panic("OOM");
+        const id = m.id orelse std.fmt.allocPrint(pumpkin.abi.arena(), "{s}:{t}", .{ pumpkin.plugin_name, m.attribute }) catch @panic("OOM");
         stack.addAttributeModifier(.{
             .attribute = m.attribute,
             .modifier = .{ .id = id, .amount = m.amount, .operation = m.operation },
@@ -249,18 +257,28 @@ fn setComponent(stack: ItemStack, component: wit.data_components.DataComponent, 
 
 /// Stores `value` on `stack` under `key`, in the plugin's namespace.
 pub fn set(stack: ItemStack, key: []const u8, value: Value) void {
+    setIn(stack, pumpkin.plugin_name, key, value);
+}
+
+/// Like `set`, in another namespace, such as one shared by several plugins.
+pub fn setIn(stack: ItemStack, namespace: []const u8, key: []const u8, value: Value) void {
     const tag: wit.common.NbtTag = switch (value) {
         .string => |v| .{ .string_tag = v },
         .int => |v| .{ .long = v },
         .float => |v| .{ .double = v },
         .bool => |v| .{ .byte = @intFromBool(v) },
     };
-    stack.setCustomData(pumpkin.plugin_name, key, .{ .root = 0, .tags = &.{tag} });
+    stack.setCustomData(namespace, key, .{ .root = 0, .tags = &.{tag} });
 }
 
 /// Returns the value this plugin stored on `stack` under `key`, if any.
 pub fn get(stack: ItemStack, key: []const u8) ?Value {
-    const tree = stack.getCustomData(pumpkin.plugin_name, key) orelse return null;
+    return getIn(stack, pumpkin.plugin_name, key);
+}
+
+/// Like `get`, in another namespace, such as another plugin's name.
+pub fn getIn(stack: ItemStack, namespace: []const u8, key: []const u8) ?Value {
+    const tree = stack.getCustomData(namespace, key) orelse return null;
     if (tree.root >= tree.tags.len) return null;
     return switch (tree.tags[tree.root]) {
         .string_tag => |v| .{ .string = v },
@@ -359,8 +377,26 @@ fn takeFrom(slots: wit.inventory.Inventory, slot: u32, match: Match, left: u32) 
     return left - n;
 }
 
+/// Returns how many of the item `stack` holds fit in the player's main
+/// inventory and off hand, counting free room in matching stacks and empty
+/// slots. Check it before `give` to decide what happens to items that don't fit.
+pub fn room(player: Player, stack: ItemStack) u32 {
+    const inventory = player.getInventory();
+    const slots = inventory.asInventory();
+    const max = stack.getMaxCount();
+    var total: u32 = 0;
+    var slot: u32 = 0;
+    while (slot < slots.getSize()) : (slot += 1) total += roomIn(slots.getItem(slot), stack, max);
+    return total + roomIn(inventory.getOffHand(), stack, max);
+}
+
+fn roomIn(existing: ?ItemStack, stack: ItemStack, max: u8) u32 {
+    const e = existing orelse return max;
+    return if (canStack(e, stack) and e.getCount() < max) max - e.getCount() else 0;
+}
+
 /// Puts `stack` into the player's inventory in the same order as vanilla and
-/// returns how many items didn't fit. Consumes `stack`.
+/// returns how many items didn't fit, which are lost. Consumes `stack`.
 pub fn give(player: Player, stack: ItemStack) u8 {
     const inventory = player.getInventory();
     const slots = inventory.asInventory();
@@ -372,7 +408,7 @@ pub fn give(player: Player, stack: ItemStack) u8 {
     left = topUp(slots, selected, stack, max, left);
     if (left > 0) {
         if (inventory.getOffHand()) |existing| {
-            if (sameItem(existing, stack) and existing.getCount() < max) {
+            if (canStack(existing, stack) and existing.getCount() < max) {
                 const moved = @min(max - existing.getCount(), left);
                 existing.setCount(existing.getCount() + moved);
                 inventory.setOffHand(existing);
@@ -401,7 +437,7 @@ pub fn give(player: Player, stack: ItemStack) u8 {
 fn topUp(slots: wit.inventory.Inventory, slot: u32, stack: ItemStack, max: u8, left: u8) u8 {
     if (left == 0) return 0;
     const existing = slots.getItem(slot) orelse return left;
-    if (!sameItem(existing, stack) or existing.getCount() >= max) return left;
+    if (!canStack(existing, stack) or existing.getCount() >= max) return left;
     const moved = @min(max - existing.getCount(), left);
     existing.setCount(existing.getCount() + moved);
     slots.setItem(slot, existing);
@@ -410,7 +446,7 @@ fn topUp(slots: wit.inventory.Inventory, slot: u32, stack: ItemStack, max: u8, l
 
 /// Reports whether two stacks are the same item with the same components,
 /// which lets them share a slot.
-fn sameItem(a: ItemStack, b: ItemStack) bool {
+pub fn canStack(a: ItemStack, b: ItemStack) bool {
     if (!sameId(a.getRegistryKey(), b.getRegistryKey())) return false;
     const ca = a.getComponents();
     const cb = b.getComponents();
@@ -434,7 +470,8 @@ fn sameId(a: []const u8, b: []const u8) bool {
 /// `copy` uses their own functions.
 const typed_components = [_]wit.data_components.DataComponent{ .custom_name, .lore, .attribute_modifiers };
 
-fn copy(stack: ItemStack) ItemStack {
+/// Returns a new stack with the same item, count and components as `stack`.
+pub fn copy(stack: ItemStack) ItemStack {
     const out: ItemStack = .init(stack.getRegistryKey(), stack.getCount());
     for (stack.getComponents()) |c| {
         if (std.mem.indexOfScalar(wit.data_components.DataComponent, &typed_components, c.component) != null) continue;
@@ -447,9 +484,9 @@ fn copy(stack: ItemStack) ItemStack {
     return out;
 }
 
-fn upright(spans: []const msg.Span) TextComponent {
+fn styled(spans: []const msg.Span, italic: bool) TextComponent {
     const root: TextComponent = .text("");
-    root.italic(false);
+    root.italic(italic);
     for (spans) |s| root.addChild(msg.span(s));
     return root;
 }
