@@ -12,7 +12,7 @@ const Heal = struct {
         .name = "example-heal",
         .version = "0.1.0",
         .authors = &.{"Pumpkin"},
-        .description = "Heals players with /heal <target> [amount].",
+        .description = "Heals you with /heal, or other players with /heal <target> [amount].",
     };
 
     pub const commands: []const cmd.Spec = &.{.{
@@ -20,6 +20,7 @@ const Heal = struct {
         .description = "Heals a player, fully or by the given amount.",
         .permission = "example-heal:command.heal",
         .default = .{ .op = .two },
+        .run = healSelf,
         .then = &.{
             .argument("target", .players, .{
                 .run = cmd.typed(heal),
@@ -27,6 +28,11 @@ const Heal = struct {
             }),
         },
     }};
+
+    fn healSelf(sender: cmd.Sender, srv: pumpkin.Server, _: cmd.Args) cmd.Result {
+        const player = sender.asPlayer() orelse return cmd.fail("say who to heal, for example /heal Steve");
+        return heal(sender, srv, .{ .target = player, .amount = null });
+    }
 
     fn heal(sender: cmd.Sender, _: pumpkin.Server, args: struct { target: pumpkin.Player, amount: ?f32 }) cmd.Result {
         const target = args.target;
