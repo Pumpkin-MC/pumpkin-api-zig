@@ -53,7 +53,7 @@ const PromptPlugin = struct {
     } };
 
     pub fn onLoad(ctx: pumpkin.Context) !void {
-        try prompt.listen(ctx);
+        try prompt.listen(ctx, .{});
     }
 
     fn askAmount(sender: cmd.Sender, _: pumpkin.Server, _: cmd.Args) cmd.Result {
