@@ -767,8 +767,36 @@ fn writeValue(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
             try writeArray(w, value);
         },
         .array => |arr| if (arr.child == u8) try writeString(w, &value) else try writeArray(w, &value),
+        .@"struct" => |st| if (st.is_tuple) try writeTuple(w, value) else try writeInlineTable(w, value),
         else => @compileError("can't write a " ++ @typeName(T) ++ " to TOML"),
     }
+}
+
+/// Writes a struct inside a value, such as an item of an array, as an inline table.
+fn writeInlineTable(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
+    try w.writeByte('{');
+    var first = true;
+    inline for (@typeInfo(@TypeOf(value)).@"struct".fields) |field| {
+        const v = @field(value, field.name);
+        const present = if (@typeInfo(field.type) == .optional) v != null else true;
+        if (present) {
+            try w.writeAll(if (first) " " else ", ");
+            first = false;
+            try writeKey(w, field.name);
+            try w.writeAll(" = ");
+            try writeValue(w, v);
+        }
+    }
+    try w.writeAll(if (first) "}" else " }");
+}
+
+fn writeTuple(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    inline for (0..value.len) |i| {
+        if (i != 0) try w.writeAll(", ");
+        try writeValue(w, value[i]);
+    }
+    try w.writeByte(']');
 }
 
 fn writeFloat(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
@@ -874,6 +902,8 @@ test "stringify and parse again" {
         worlds: []const []const u8 = &.{ "overworld", "nether" },
         nickname: ?[]const u8 = null,
         limits: struct { chat: u32 = 256 } = .{},
+        warps: []const struct { name: []const u8, y: ?i32 = null } = &.{ .{ .name = "spawn", .y = 64 }, .{ .name = "end" } },
+        enchants: []const struct { []const u8, u32 } = &.{.{ "sharpness", 5 }},
     };
 
     const text = try stringify(arena.allocator(), Config{});
