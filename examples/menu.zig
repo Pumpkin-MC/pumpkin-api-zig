@@ -36,13 +36,17 @@ const Menu = struct {
 
     fn openColors(sender: cmd.Sender, _: pumpkin.Server, _: cmd.Args) cmd.Result {
         const player = sender.asPlayer() orelse return cmd.fail("only players can pick a color");
+        var names: [colors.len][1]msg.Span = undefined;
         var buttons: [colors.len]menu.Button = undefined;
-        for (&buttons, colors, 0..) |*button, c, i| button.* = .{
-            .slot = @intCast(10 + 2 * i),
-            .icon = .{ .id = c.wool, .name = &.{.{ .text = @tagName(c.color), .color = c.color }} },
-            .on_click = pickColor,
-            .data = i,
-        };
+        for (&buttons, &names, colors, 0..) |*button, *name, c, i| {
+            name.* = .{.{ .text = @tagName(c.color), .color = c.color }};
+            button.* = .{
+                .slot = @intCast(10 + 2 * i),
+                .icon = .{ .id = c.wool, .name = name },
+                .on_click = pickColor,
+                .data = i,
+            };
+        }
         menu.open(player, .{
             .title = &.{.{ .text = "Pick a color" }},
             .buttons = &buttons,
