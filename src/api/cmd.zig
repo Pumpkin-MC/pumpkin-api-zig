@@ -70,6 +70,9 @@ pub const Spec = struct {
     /// Has to start with "<plugin name>:". A node the server has never heard
     /// of denies everyone, so `register` registers it as well.
     permission: []const u8,
+    /// Turn this off when the node is registered elsewhere, for example with
+    /// children of its own. `description` and `default` are then unused.
+    register_permission: bool = true,
     default: wit.permission.PermissionDefault = .allow,
     run: ?*const Handler = null,
     then: []const Node = &.{},
@@ -102,7 +105,7 @@ pub fn register(ctx: Context, spec: Spec) error{ PermissionRejected, Unsupported
         std.log.err("/{s}: the server doesn't support the argument type .{t} of '{s}'", .{ spec.names[0], arg.type, arg.name });
         return error.UnsupportedArgument;
     }
-    switch (ctx.registerPermission(.{
+    if (spec.register_permission) switch (ctx.registerPermission(.{
         .node = spec.permission,
         .description = spec.description,
         .default = spec.default,
@@ -113,7 +116,7 @@ pub fn register(ctx: Context, spec: Spec) error{ PermissionRejected, Unsupported
             std.log.err("permission {s}: {s}", .{ spec.permission, message });
             return error.PermissionRejected;
         },
-    }
+    };
 
     const root: command.Command = .init(spec.names, spec.description);
     if (spec.run) |handler| root.executeWithHandlerId(@intFromPtr(handler));
@@ -126,7 +129,12 @@ pub fn ok(count: i32) Result {
 }
 
 pub fn fail(message: []const u8) Result {
-    return .{ .err = .{ .command_failed = .text(message) } };
+    return failWith(.text(message));
+}
+
+/// Like `fail`, with any text component, such as one from `msg.build`.
+pub fn failWith(message: wit.text.TextComponent) Result {
+    return .{ .err = .{ .command_failed = message } };
 }
 
 /// The value of argument `name` if it was parsed as `tag`.
@@ -160,6 +168,31 @@ pub fn float(args: Args, name: []const u8) ?f64 {
     };
 }
 
+/// What is wrong with an argument `typed` couldn't fill a field from.
+pub const Problem = enum {
+    missing,
+    out_of_range,
+    /// A decimal number was given for an integer field.
+    not_whole,
+    /// A `Player` field got a selector that matched none or several players.
+    not_one_player,
+};
+
+pub const BadArgument = fn (sender: Sender, name: []const u8, problem: Problem) Result;
+
+/// Answers a command whose arguments `typed` couldn't read. Replace it to
+/// change or translate the messages.
+pub var bad_argument: *const BadArgument = defaultBadArgument;
+
+pub fn defaultBadArgument(_: Sender, name: []const u8, problem: Problem) Result {
+    return switch (problem) {
+        .missing => failFmt("missing argument '{s}'", .{name}),
+        .out_of_range => failFmt("'{s}' is out of range", .{name}),
+        .not_whole => failFmt("'{s}' has to be a whole number", .{name}),
+        .not_one_player => failFmt("'{s}' has to be exactly one player", .{name}),
+    };
+}
+
 /// Wraps `fn (Sender, Server, T) Result`, filling `T` with the arguments of the same name.
 pub fn typed(comptime handler: anytype) *const Handler {
     const params = @typeInfo(@TypeOf(handler)).@"fn".params;
@@ -180,8 +213,8 @@ pub fn typed(comptime handler: anytype) *const Handler {
                     else if (Value != field.type)
                         null
                     else
-                        return failFmt("missing argument '{s}'", .{field.name}),
-                    .invalid => |why| return failFmt("'{s}' {s}", .{ field.name, why }),
+                        return bad_argument(sender, field.name, .missing),
+                    .invalid => |problem| return bad_argument(sender, field.name, problem),
                 };
             }
             return handler(sender, srv, out);
@@ -194,7 +227,7 @@ fn failFmt(comptime format: []const u8, args: anytype) Result {
 }
 
 fn Read(comptime T: type) type {
-    return union(enum) { ok: T, missing, invalid: []const u8 };
+    return union(enum) { ok: T, missing, invalid: Problem };
 }
 
 fn read(comptime T: type, arg: Arg) Read(T) {
@@ -203,14 +236,14 @@ fn read(comptime T: type, arg: Arg) Read(T) {
 
     switch (@typeInfo(T)) {
         .int => if (arg == .num) return switch (arg.num) {
-            .err => .{ .invalid = "is out of range" },
+            .err => .{ .invalid = .out_of_range },
             .ok => |number| switch (number) {
-                inline .int32, .int64 => |v| if (std.math.cast(T, v)) |c| .{ .ok = c } else .{ .invalid = "is out of range" },
-                .float32, .float64 => .{ .invalid = "has to be a whole number" },
+                inline .int32, .int64 => |v| if (std.math.cast(T, v)) |c| .{ .ok = c } else .{ .invalid = .out_of_range },
+                .float32, .float64 => .{ .invalid = .not_whole },
             },
         },
         .float => if (arg == .num) return switch (arg.num) {
-            .err => .{ .invalid = "is out of range" },
+            .err => .{ .invalid = .out_of_range },
             .ok => |number| switch (number) {
                 inline .int32, .int64 => |v| .{ .ok = @floatFromInt(v) },
                 inline .float32, .float64 => |v| .{ .ok = @floatCast(v) },
@@ -219,7 +252,7 @@ fn read(comptime T: type, arg: Arg) Read(T) {
         else => {},
     }
     if (T == Player and arg == .players) {
-        return if (arg.players.len == 1) .{ .ok = arg.players[0] } else .{ .invalid = "has to be exactly one player" };
+        return if (arg.players.len == 1) .{ .ok = arg.players[0] } else .{ .invalid = .not_one_player };
     }
     inline for (@typeInfo(Arg).@"union".fields) |case| {
         if (case.type == T and arg == @field(std.meta.Tag(Arg), case.name)) return .{ .ok = @field(arg, case.name) };
@@ -253,8 +286,8 @@ pub fn suggestions(request: command.SuggestionRequest, values: []const []const u
 
 test "read" {
     try std.testing.expectEqualDeep(Read(i32){ .ok = 5 }, read(i32, .{ .num = .{ .ok = .{ .int64 = 5 } } }));
-    try std.testing.expectEqualDeep(Read(u8){ .invalid = "is out of range" }, read(u8, .{ .num = .{ .ok = .{ .int32 = 300 } } }));
-    try std.testing.expectEqualDeep(Read(i32){ .invalid = "has to be a whole number" }, read(i32, .{ .num = .{ .ok = .{ .float64 = 1.5 } } }));
+    try std.testing.expectEqualDeep(Read(u8){ .invalid = .out_of_range }, read(u8, .{ .num = .{ .ok = .{ .int32 = 300 } } }));
+    try std.testing.expectEqualDeep(Read(i32){ .invalid = .not_whole }, read(i32, .{ .num = .{ .ok = .{ .float64 = 1.5 } } }));
     try std.testing.expectEqualDeep(Read(f32){ .ok = 2 }, read(f32, .{ .num = .{ .ok = .{ .int32 = 2 } } }));
     try std.testing.expectEqualDeep(Read(i32){ .ok = 40 }, read(i32, .{ .time = 40 }));
     try std.testing.expectEqualDeep(Read(bool){ .ok = true }, read(bool, .{ .bool = true }));
@@ -266,6 +299,6 @@ test "read" {
 
     const one: Player = @enumFromInt(7);
     try std.testing.expectEqualDeep(Read(Player){ .ok = one }, read(Player, .{ .players = &.{one} }));
-    try std.testing.expectEqualDeep(Read(Player){ .invalid = "has to be exactly one player" }, read(Player, .{ .players = &.{ one, one } }));
+    try std.testing.expectEqualDeep(Read(Player){ .invalid = .not_one_player }, read(Player, .{ .players = &.{ one, one } }));
     try std.testing.expectEqualDeep(1, read([]const Player, .{ .players = &.{one} }).ok.len);
 }
