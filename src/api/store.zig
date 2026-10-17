@@ -1,6 +1,6 @@
 //! Data a plugin keeps for each player, or for anything else with a name,
-//! such as coins, homes or statistics. Every entry is a JSON file in a folder
-//! of the plugin's data folder. Entries are read the first time they are
+//! such as coins, homes or statistics. Every entry is a file, JSON unless the
+//! store says otherwise, in a folder of the plugin's data folder. Entries are read the first time they are
 //! used, written again when they change, and dropped from memory once they
 //! go unused. Needs the "fs.read.data" and "fs.write.data" permissions.
 //!
@@ -13,21 +13,74 @@ const std = @import("std");
 const abi = @import("../runtime/abi.zig");
 const runtime_io = @import("../runtime/io.zig");
 const tasks = @import("tasks.zig");
+const toml_parser = @import("toml.zig");
 const wit = @import("../bindings/pumpkin.zig");
 
 const Player = wit.player.Player;
 const Server = wit.server.Server;
 
 pub const Error = error{
-    /// The key is empty or has characters other than letters, digits, '-', '_' and '.'.
+    /// The store's `valid_key` rejected the key.
     InvalidKey,
     /// The entry's file couldn't be read, see the log.
     ReadFailed,
-    /// The entry's file isn't valid JSON for the entry type, see the log. The
-    /// file is left as it is.
+    /// The entry's file couldn't be decoded into the entry type, see the log.
+    /// The file is left as it is.
     InvalidData,
     OutOfMemory,
 };
+
+/// How entries of type `T` are turned into file contents and back.
+pub fn Codec(comptime T: type) type {
+    return struct {
+        /// Appended to the key to name the file, such as ".json".
+        extension: []const u8,
+        encode: *const fn (std.mem.Allocator, T) error{OutOfMemory}![]const u8,
+        /// Allocates the value's strings and slices with the given allocator,
+        /// which lives as long as the entry.
+        decode: *const fn (std.mem.Allocator, []const u8) anyerror!T,
+    };
+}
+
+/// Entries as JSON, indented as `whitespace` says.
+pub fn json(comptime T: type, comptime whitespace: @FieldType(std.json.Stringify.Options, "whitespace")) Codec(T) {
+    const impl = struct {
+        fn encode(gpa: std.mem.Allocator, value: T) error{OutOfMemory}![]const u8 {
+            return std.json.Stringify.valueAlloc(gpa, value, .{ .whitespace = whitespace });
+        }
+
+        fn decode(gpa: std.mem.Allocator, text: []const u8) anyerror!T {
+            return std.json.parseFromSliceLeaky(T, gpa, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        }
+    };
+    return .{ .extension = ".json", .encode = impl.encode, .decode = impl.decode };
+}
+
+/// Entries as TOML, with the parser behind `pumpkin.config`.
+pub fn toml(comptime T: type) Codec(T) {
+    const impl = struct {
+        fn encode(gpa: std.mem.Allocator, value: T) error{OutOfMemory}![]const u8 {
+            return toml_parser.stringify(gpa, value);
+        }
+
+        fn decode(gpa: std.mem.Allocator, text: []const u8) anyerror!T {
+            var diagnostics: toml_parser.Diagnostics = .{};
+            const tree = try toml_parser.parse(abi.arena(), text, &diagnostics);
+            return std.json.parseFromValueLeaky(T, gpa, tree, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        }
+    };
+    return .{ .extension = ".toml", .encode = impl.encode, .decode = impl.decode };
+}
+
+/// The default `valid_key`: letters, digits, '-', '_' and '.', not empty and
+/// not starting with '.', which keeps keys inside the store's folder.
+pub fn isValidKey(key: []const u8) bool {
+    if (key.len == 0 or key[0] == '.') return false;
+    for (key) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.') return false;
+    }
+    return true;
+}
 
 /// A folder of entries of type `T`, which needs a default for every field.
 /// Fields a file lacks get their defaults, so new fields can be added later.
@@ -37,9 +90,17 @@ pub fn Store(comptime T: type) type {
 
         /// The folder, relative to the plugin's data folder.
         dir: []const u8,
-        /// How often changed entries are written. An entry that wasn't used
-        /// for a whole period is dropped from memory after it is written.
+        /// How often changed entries are written.
         autosave: tasks.Duration = .minutes(1),
+        /// How many autosave periods an entry may go unused before it is
+        /// written and dropped from memory. Null keeps entries until the plugin unloads.
+        idle: ?u32 = 1,
+        codec: Codec(T) = json(T, .indent_2),
+        /// Decides which keys are allowed. A key becomes part of a file path,
+        /// so the check has to keep it inside the folder.
+        valid_key: *const fn ([]const u8) bool = isValidKey,
+        /// Files larger than this fail with `error.ReadFailed`.
+        max_size: usize = 16 * 1024 * 1024,
         entries: std.StringArrayHashMapUnmanaged(*Entry) = .empty,
         started: bool = false,
 
@@ -49,7 +110,8 @@ pub fn Store(comptime T: type) type {
             /// The hash of the value as it was last read or written, which
             /// tells whether it changed since.
             saved: u64,
-            used: bool,
+            /// Autosave periods since the entry was last used.
+            unused: u32,
         };
 
         /// Returns the entry for `key`, reading it from its file or starting
@@ -57,24 +119,21 @@ pub fn Store(comptime T: type) type {
         /// dropped, so look it up again in every callback instead of keeping it.
         pub fn get(self: *Self, key: []const u8) Error!*T {
             if (self.entries.get(key)) |entry| {
-                entry.used = true;
+                entry.unused = 0;
                 return &entry.value;
             }
-            try checkKey(key);
+            if (!self.valid_key(key)) return error.InvalidKey;
             self.start();
 
             const entry = try abi.heap.create(Entry);
             errdefer abi.heap.destroy(entry);
-            entry.* = .{ .value = .{}, .memory = .init(abi.heap), .saved = 0, .used = true };
+            entry.* = .{ .value = .{}, .memory = .init(abi.heap), .saved = 0, .unused = 0 };
             errdefer entry.memory.deinit();
 
             const path = try self.pathOf(abi.arena(), key, "");
             const io = runtime_io.current();
-            if (std.Io.Dir.cwd().readFileAlloc(io, path, abi.arena(), .limited(16 * 1024 * 1024))) |text| {
-                entry.value = std.json.parseFromSliceLeaky(T, entry.memory.allocator(), text, .{
-                    .ignore_unknown_fields = true,
-                    .allocate = .alloc_always,
-                }) catch |err| {
+            if (std.Io.Dir.cwd().readFileAlloc(io, path, abi.arena(), .limited(self.max_size))) |text| {
+                entry.value = self.codec.decode(entry.memory.allocator(), text) catch |err| {
                     std.log.err("{s} can't be read as an entry ({t}), it is left as it is", .{ path, err });
                     return error.InvalidData;
                 };
@@ -85,7 +144,7 @@ pub fn Store(comptime T: type) type {
                     return error.ReadFailed;
                 },
             }
-            entry.saved = hash(try stringify(entry.value));
+            entry.saved = hash(try self.codec.encode(abi.arena(), entry.value));
 
             const owned_key = try entry.memory.allocator().dupe(u8, key);
             try self.entries.put(abi.heap, owned_key, entry);
@@ -107,7 +166,7 @@ pub fn Store(comptime T: type) type {
         /// Reports whether `key` has an entry, in memory or on disk.
         pub fn exists(self: *Self, key: []const u8) bool {
             if (self.entries.contains(key)) return true;
-            checkKey(key) catch return false;
+            if (!self.valid_key(key)) return false;
             const path = self.pathOf(abi.arena(), key, "") catch return false;
             std.Io.Dir.cwd().access(runtime_io.current(), path, .{}) catch return false;
             return true;
@@ -128,7 +187,7 @@ pub fn Store(comptime T: type) type {
 
         /// Deletes the entry for `key`, from memory and from disk.
         pub fn remove(self: *Self, key: []const u8) !void {
-            try checkKey(key);
+            if (!self.valid_key(key)) return error.InvalidKey;
             if (self.entries.fetchSwapRemove(key)) |kv| destroy(kv.value);
             const path = try self.pathOf(abi.arena(), key, "");
             std.Io.Dir.cwd().deleteFile(runtime_io.current(), path) catch |err| switch (err) {
@@ -151,8 +210,9 @@ pub fn Store(comptime T: type) type {
                 const key = self.entries.keys()[i];
                 const entry = self.entries.values()[i];
                 self.write(key, entry) catch continue;
-                if (entry.used) {
-                    entry.used = false;
+                const idle = self.idle orelse continue;
+                if (entry.unused < idle) {
+                    entry.unused += 1;
                 } else {
                     self.entries.swapRemoveAt(i);
                     destroy(entry);
@@ -168,7 +228,7 @@ pub fn Store(comptime T: type) type {
         /// Writes to a temporary file first and renames it over the old one,
         /// so a crash halfway through doesn't leave a broken file.
         fn write(self: *Self, key: []const u8, entry: *Entry) !void {
-            const text = try stringify(entry.value);
+            const text = try self.codec.encode(abi.arena(), entry.value);
             const h = hash(text);
             if (h == entry.saved) return;
 
@@ -184,11 +244,7 @@ pub fn Store(comptime T: type) type {
         }
 
         fn pathOf(self: *const Self, gpa: std.mem.Allocator, key: []const u8, suffix: []const u8) ![]const u8 {
-            return std.fmt.allocPrint(gpa, "{s}/{s}.json{s}", .{ self.dir, key, suffix });
-        }
-
-        fn stringify(value: T) error{OutOfMemory}![]const u8 {
-            return std.json.Stringify.valueAlloc(abi.arena(), value, .{ .whitespace = .indent_2 });
+            return std.fmt.allocPrint(gpa, "{s}/{s}{s}{s}", .{ self.dir, key, self.codec.extension, suffix });
         }
 
         fn destroy(entry: *Entry) void {
@@ -196,13 +252,6 @@ pub fn Store(comptime T: type) type {
             abi.heap.destroy(entry);
         }
     };
-}
-
-fn checkKey(key: []const u8) error{InvalidKey}!void {
-    if (key.len == 0 or key[0] == '.') return error.InvalidKey;
-    for (key) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.') return error.InvalidKey;
-    }
 }
 
 fn hash(text: []const u8) u64 {
@@ -217,11 +266,27 @@ pub fn flushAll() void {
     for (open_stores.items) |s| s.flush(s.store);
 }
 
-test checkKey {
-    try checkKey("069a79f4-44e9-4726-a5be-fca90e38aaf5");
-    try checkKey("spawn.town");
-    try std.testing.expectError(error.InvalidKey, checkKey(""));
-    try std.testing.expectError(error.InvalidKey, checkKey("../config"));
-    try std.testing.expectError(error.InvalidKey, checkKey("a/b"));
-    try std.testing.expectError(error.InvalidKey, checkKey(".hidden"));
+test isValidKey {
+    try std.testing.expect(isValidKey("069a79f4-44e9-4726-a5be-fca90e38aaf5"));
+    try std.testing.expect(isValidKey("spawn.town"));
+    try std.testing.expect(!isValidKey(""));
+    try std.testing.expect(!isValidKey("../config"));
+    try std.testing.expect(!isValidKey("a/b"));
+    try std.testing.expect(!isValidKey(".hidden"));
+}
+
+test "codecs read back what they write" {
+    const Home = struct { name: []const u8, x: f64 };
+    const Profile = struct { visits: u32 = 0, homes: []const Home = &.{} };
+    const value: Profile = .{ .visits = 3, .homes = &.{.{ .name = "base", .x = 1.5 }} };
+
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    inline for (.{ json(Profile, .indent_2), toml(Profile) }) |codec| {
+        const text = try codec.encode(memory.allocator(), value);
+        const back = try codec.decode(memory.allocator(), text);
+        try std.testing.expectEqual(value.visits, back.visits);
+        try std.testing.expectEqualStrings("base", back.homes[0].name);
+        try std.testing.expectEqual(1.5, back.homes[0].x);
+    }
 }
