@@ -1,14 +1,18 @@
 //! A config file in the plugin's data folder, read into a struct whose field
-//! defaults make up the default config. Files ending in `.json` are JSON,
-//! everything else is TOML. Needs the "fs.read.data" and "fs.write.data"
-//! permissions.
+//! defaults make up the default config. Files are TOML, or JSON when their
+//! name ends in `.json`, unless `format` says otherwise. Needs the
+//! "fs.read.data" and "fs.write.data" permissions.
 //!
 //!     var config: pumpkin.config.File(Config) = .{ .path = "config.toml" };
 
 const std = @import("std");
 const abi = @import("../runtime/abi.zig");
 const runtime_io = @import("../runtime/io.zig");
-const toml = @import("toml.zig");
+/// The TOML parser and writer behind config files, for plugins that read
+/// TOML on their own.
+pub const toml = @import("toml.zig");
+
+pub const Format = enum { toml, json };
 
 pub fn File(comptime T: type) type {
     if (@typeInfo(T) != .@"struct") @compileError("a config has to be a struct");
@@ -18,6 +22,16 @@ pub fn File(comptime T: type) type {
 
         /// The file name, relative to the plugin's data folder.
         path: []const u8,
+        /// Null picks the format from the file name.
+        format: ?Format = null,
+        /// Whether `load` writes the defaults when the file doesn't exist.
+        create: bool = true,
+        /// Whether `load` adds the settings the file lacks to it.
+        add_missing: bool = true,
+        /// Whether `load` logs settings the struct doesn't have.
+        report_unknown: bool = true,
+        /// Files larger than this fail to load.
+        max_size: usize = 16 * 1024 * 1024,
         /// The config as last loaded. Its strings stay valid until the next
         /// successful `load` or `deinit`.
         value: T = .{},
@@ -26,12 +40,14 @@ pub fn File(comptime T: type) type {
         /// Reads the file into `value`. A missing file is created with the
         /// defaults, and settings the file lacks are added with their defaults,
         /// which is how new settings reach existing configs. Unknown settings
-        /// are reported in the log and left in place. When the file can't be
-        /// parsed, the error is logged with its line and `value` stays as it was.
+        /// are reported in the log and left in place. The fields above turn
+        /// each of these off. When the file can't be parsed, the error is
+        /// logged with its line and `value` stays as it was.
         pub fn load(self: *Self) !void {
             const io = runtime_io.current();
-            const text = std.Io.Dir.cwd().readFileAlloc(io, self.path, abi.arena(), .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+            const text = std.Io.Dir.cwd().readFileAlloc(io, self.path, abi.arena(), .limited(self.max_size)) catch |err| switch (err) {
                 error.FileNotFound => {
+                    if (!self.create) return err;
                     std.log.info("creating {s} with the default settings", .{self.path});
                     return self.save();
                 },
@@ -57,7 +73,7 @@ pub fn File(comptime T: type) type {
             self.value = value;
 
             const missing = self.checkKeys(T, tree, "");
-            if (missing) {
+            if (missing and self.add_missing) {
                 std.log.info("adding new settings to {s}", .{self.path});
                 try self.save();
             }
@@ -84,7 +100,8 @@ pub fn File(comptime T: type) type {
         }
 
         fn isJson(self: *const Self) bool {
-            return std.mem.endsWith(u8, self.path, ".json");
+            const format = self.format orelse return std.mem.endsWith(u8, self.path, ".json");
+            return format == .json;
         }
 
         /// Parses `text` into a tree that lives until the current callback returns.
@@ -136,7 +153,7 @@ pub fn File(comptime T: type) type {
                 const known = inline for (fields) |field| {
                     if (std.mem.eql(u8, field.name, key)) break true;
                 } else false;
-                if (!known) {
+                if (!known and self.report_unknown) {
                     if (prefix.len == 0) {
                         std.log.warn("{s}: unknown setting '{s}'", .{ self.path, key });
                     } else {
