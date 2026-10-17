@@ -22,7 +22,7 @@ To try a change, copy the plugins from `zig-out/` into the `plugins` folder of a
 ## Layout
 
 - `src/pumpkin.zig` is the package root and holds `register`, which exports a plugin.
-- `src/api/` holds the hand-written helpers: `cmd`, `msg`, `menu`, `item`, `http`, `net`, `config`, `store` and `tasks`.
+- `src/api/` holds the hand-written helpers: `cmd`, `msg`, `menu`, `item`, `prompt`, `http`, `net`, `config`, `store` and `tasks`.
 - `src/runtime/` holds the canonical ABI layer and the `std.Io` behind `pumpkin.io()`.
 - `src/bindings/` holds the generated bindings. Don't edit them by hand: change `tools/gen.zig` or the WIT and run `zig build gen`.
 - `examples/` has one plugin per topic. `examples/nettest.zig` runs every networking path against a real server with `/nettest`.

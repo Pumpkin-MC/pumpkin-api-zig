@@ -5,7 +5,8 @@
 //! `register`, typed event and task handlers, `cmd` for commands, `msg` for
 //! text components, `menu` for inventory menus, `http` and `net` for
 //! networking, `config` for config files, `store` for data kept per player,
-//! `tasks` for scheduled work, `item` for item stacks and `std.log` support.
+//! `prompt` for questions in chat, `tasks` for scheduled work, `item` for item
+//! stacks and `std.log` support.
 //!
 //! Whatever the API hands out is only good until the current callback returns:
 //! strings, slices and records live in a per-call arena and handles are
@@ -25,6 +26,7 @@ pub const config = @import("api/config.zig");
 pub const tasks = @import("api/tasks.zig");
 pub const item = @import("api/item.zig");
 pub const store = @import("api/store.zig");
+pub const prompt = @import("api/prompt.zig");
 const runtime_io = @import("runtime/io.zig");
 const wit = @import("bindings/pumpkin.zig");
 

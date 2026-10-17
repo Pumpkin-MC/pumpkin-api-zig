@@ -8,7 +8,7 @@ pumpkin-api-zig lets people write plugins for [Pumpkin](https://github.com/Pumpk
 
 - Generated bindings for every interface of the plugin API and of `wasi:sockets`.
 - The canonical ABI layer underneath them, which moves values between Zig and the host.
-- Hand-written helpers on top (`cmd`, `msg`, `menu`, `item`, `http`, `net`, `config`, `store`, `tasks`) that turn the raw API into something pleasant to use.
+- Hand-written helpers on top (`cmd`, `msg`, `menu`, `item`, `prompt`, `http`, `net`, `config`, `store`, `tasks`) that turn the raw API into something pleasant to use.
 
 Things worth knowing before you start:
 
