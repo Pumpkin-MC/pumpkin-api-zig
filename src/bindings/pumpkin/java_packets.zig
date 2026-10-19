@@ -573,7 +573,8 @@ pub const SSetTestBlock = struct {
 };
 
 pub const SSpectateEntity = struct {
-    target: Uuid,
+    /// Vanilla `OPTIONAL_VAR_INT`: 0 for no target, otherwise the entity ID plus one.
+    target: i32,
 };
 
 pub const SSwingArm = struct {
