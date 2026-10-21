@@ -116,6 +116,17 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
+    const vault_api = b.createModule(.{ .root_source_file = b.path("src/pumpkin.zig"), .target = b.graph.host });
+    vault_api.addOptions("build_options", buildOptions(b));
+    const vault_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/vault.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "pumpkin", .module = vault_api }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(vault_tests).step);
+
     const check = b.addObject(.{
         .name = "check",
         .root_module = b.createModule(.{

@@ -139,7 +139,7 @@ comptime {
 | [`items`](examples/items.zig) | Building, editing and recognizing items, and giving and taking them |
 | [`store`](examples/store.zig) | Data kept for every player in a file of its own |
 | [`prompt`](examples/prompt.zig) | Questions answered in chat and choices to click |
-| [`vault`](examples/vault.zig) | Pages of storage in a menu with free slots, saved for every player |
+| [`vault`](examples/vault.zig) | Personal storage with a page selector, usage indicators and configurable capacity |
 | [`nettest`](examples/nettest.zig) | Runs every networking path with `/nettest` and reports each one |
 
 ## Commands
@@ -193,6 +193,8 @@ fn buy(click: pumpkin.menu.Click) void {
 ```
 
 Items can't be taken out of a menu or put into it. Buttons that share a handler can be told apart with `.data`. `on_close` runs when the menu is closed, when another menu replaces it, or when the player leaves.
+
+The vault's **All pages** button shows each page's usage and the total capacity. `/vault <page>` opens a page directly. Its `config.toml` has `pages = 5`, configurable from 1 to 45 after a plugin restart. Lowering it keeps occupied higher pages accessible until they are emptied; existing vault files keep working.
 
 ## Files and other system access
 
