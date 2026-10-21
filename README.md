@@ -128,7 +128,7 @@ comptime {
 | --- | --- |
 | [`hello`](examples/hello.zig) | Events, a command and styled text |
 | [`heal`](examples/heal.zig) | Command arguments read with `cmd.typed` |
-| [`menu`](examples/menu.zig) | An inventory menu with buttons |
+| [`menu`](examples/menu.zig) | Inventory menus with buttons, and a trash can with free slots |
 | [`config`](examples/config.zig) | A JSON config file in the plugin's data folder |
 | [`dns`](examples/dns.zig) | Looking up the addresses of a host name |
 | [`http`](examples/http.zig) | A TCP connection with a timeout and a plain HTTP request |
@@ -139,6 +139,7 @@ comptime {
 | [`items`](examples/items.zig) | Building, editing and recognizing items, and giving and taking them |
 | [`store`](examples/store.zig) | Data kept for every player in a file of its own |
 | [`prompt`](examples/prompt.zig) | Questions answered in chat and choices to click |
+| [`vault`](examples/vault.zig) | Pages of storage in a menu with free slots, saved for every player |
 | [`nettest`](examples/nettest.zig) | Runs every networking path with `/nettest` and reports each one |
 
 ## Commands
