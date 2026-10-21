@@ -178,8 +178,8 @@ pub fn isOpen(player: Player) bool {
     return sessions.contains(player.getId());
 }
 
-/// Returns the slots of the player's open menu, including what they put into
-/// an `editable` one. It also works inside `on_close`, so a plugin can see
+/// Returns the slots of the player's open menu, including items in free
+/// slots. It also works inside `on_close`, so a plugin can see
 /// what was left in the menu before it goes away.
 pub fn items(player: Player) ?Inventory {
     if (sessions.get(player.getId())) |session| return session.items;

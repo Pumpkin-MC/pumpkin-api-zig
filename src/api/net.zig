@@ -22,6 +22,9 @@ pub const ready = runtime_io.ready;
 /// closed for reading too slowly.
 pub const default_max_outgoing = 1024 * 1024;
 
+/// The receive buffer size used when a connection doesn't choose its own.
+pub const default_read_buffer_size = 4096;
+
 pub const Framing = enum {
     /// Callbacks receive one line at a time, without the line ending.
     lines,
@@ -56,7 +59,7 @@ pub const Connection = struct {
     data: usize = 0,
     closed: bool = false,
     outgoing: std.ArrayList(u8) = .empty,
-    buffer: [4096]u8,
+    buffer: []u8,
 
     pub fn address(conn: *const Connection) Address {
         return conn.stream.socket.address;
@@ -137,6 +140,8 @@ pub const ConnectOptions = struct {
     timeout_ms: u32 = 10_000,
     /// How long `readLine` waits for a line.
     read_timeout_ms: u32 = 10_000,
+    /// Receive buffer capacity. A line, including its ending, has to fit.
+    read_buffer_size: usize = default_read_buffer_size,
     /// The outgoing queue limit, used only when the connection is polled.
     max_outgoing: usize = default_max_outgoing,
     /// If any callback is set, the connection is polled like the connections
@@ -148,6 +153,7 @@ pub const ConnectOptions = struct {
 /// order until one accepts. Needs the "network.dns" and "network.tcp.connect"
 /// permissions.
 pub fn connect(host: []const u8, port: u16, options: ConnectOptions) !*Connection {
+    if (options.read_buffer_size == 0) return error.InvalidBufferSize;
     const io = runtime_io.current();
     const timeout: std.Io.Timeout = (std.Io.Timeout{ .duration = .{
         .raw = .fromMilliseconds(options.timeout_ms),
@@ -158,9 +164,10 @@ pub fn connect(host: []const u8, port: u16, options: ConnectOptions) !*Connectio
         try ip.connect(io, .{ .mode = .stream, .timeout = timeout })
     else |_|
         try connectHost(try net.HostName.init(host), port, timeout);
+    errdefer stream.close(io);
 
     const polled = options.callbacks.any();
-    const conn = newConnection(stream, options.callbacks, polled, options.read_timeout_ms, options.max_outgoing);
+    const conn = try newConnection(stream, options, polled);
     clients.append(abi.heap, conn) catch @panic("OOM");
     if (polled) startPolling();
     return conn;
@@ -192,6 +199,8 @@ pub const ListenOptions = struct {
     /// machines, which the server config may forbid.
     host: []const u8 = "127.0.0.1",
     on_connect: ?*const fn (*Connection) void = null,
+    /// Receive buffer capacity for each accepted connection, including line endings.
+    read_buffer_size: usize = default_read_buffer_size,
     max_outgoing: usize = default_max_outgoing,
     callbacks: Callbacks = .{},
 };
@@ -224,6 +233,7 @@ pub const Listener = struct {
 /// Listens for TCP connections on `options.port`. Needs the "network.tcp.bind"
 /// permission.
 pub fn listen(options: ListenOptions) !*Listener {
+    if (options.read_buffer_size == 0) return error.InvalidBufferSize;
     const address = try Address.parse(options.host, options.port);
     const listener = abi.heap.create(Listener) catch @panic("OOM");
     errdefer abi.heap.destroy(listener);
@@ -282,18 +292,19 @@ var sockets: std.ArrayList(*Udp) = .empty;
 var task: ?u32 = null;
 var datagram_buffer: [65536]u8 = undefined;
 
-fn newConnection(stream: net.Stream, callbacks: Callbacks, polled: bool, read_timeout_ms: u32, max_outgoing: usize) *Connection {
-    const conn = abi.heap.create(Connection) catch @panic("OOM");
+fn newConnection(stream: net.Stream, options: ConnectOptions, polled: bool) !*Connection {
+    const conn = try abi.heap.create(Connection);
+    errdefer abi.heap.destroy(conn);
     conn.* = .{
         .stream = stream,
         .reader = undefined,
-        .callbacks = callbacks,
+        .callbacks = options.callbacks,
         .polled = polled,
-        .read_timeout_ms = read_timeout_ms,
-        .max_outgoing = max_outgoing,
-        .buffer = undefined,
+        .read_timeout_ms = options.read_timeout_ms,
+        .max_outgoing = options.max_outgoing,
+        .buffer = try abi.heap.alloc(u8, options.read_buffer_size),
     };
-    conn.reader = stream.reader(runtime_io.current(), &conn.buffer);
+    conn.reader = stream.reader(runtime_io.current(), conn.buffer);
     return conn;
 }
 
@@ -313,7 +324,11 @@ pub fn poll() void {
         const listener = listeners.items[i];
         while (!listener.closed and ready(listener.server.socket.handle)) {
             const stream = listener.server.accept(runtime_io.current()) catch break;
-            const conn = newConnection(stream, listener.options.callbacks, true, 0, listener.options.max_outgoing);
+            const conn = newConnection(stream, .{
+                .callbacks = listener.options.callbacks,
+                .read_buffer_size = listener.options.read_buffer_size,
+                .max_outgoing = listener.options.max_outgoing,
+            }, true) catch @panic("OOM");
             listener.connections.append(abi.heap, conn) catch @panic("OOM");
             if (listener.options.on_connect) |on_connect| on_connect(conn);
         }
@@ -380,7 +395,11 @@ fn sweep() void {
 fn sweepConnections(list: *std.ArrayList(*Connection)) void {
     var i: usize = 0;
     while (i < list.items.len) {
-        if (list.items[i].closed) abi.heap.destroy(list.swapRemove(i)) else i += 1;
+        if (list.items[i].closed) {
+            const conn = list.swapRemove(i);
+            abi.heap.free(conn.buffer);
+            abi.heap.destroy(conn);
+        } else i += 1;
     }
 }
 

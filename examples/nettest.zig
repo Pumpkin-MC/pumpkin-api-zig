@@ -47,6 +47,9 @@ const NetTest = struct {
         .{ "net: poll() returns right away when nothing is waiting", highLevelIdlePoll },
         .{ "net: a client that doesn't read can't block, and gets closed", highLevelSlowReader },
         .{ "net: readLine gives up after its timeout", highLevelReadTimeout },
+        .{ "net: custom receive buffers handle large lines both ways", highLevelLargeLine },
+        .{ "net: readLine uses the configured receive buffer", highLevelLargeReadLine },
+        .{ "net: a line that fills the receive buffer closes the connection", highLevelLineLimit },
     };
 
     fn run(sender: cmd.Sender, _: pumpkin.Server, _: cmd.Args) cmd.Result {
@@ -458,6 +461,61 @@ fn highLevelReadTimeout() !void {
     if (client.readLine()) |_| return error.GotALine else |err| if (err != error.Timeout) return err;
     const took = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
     if (took < 250 or took > 2000) return error.WrongDuration;
+}
+
+fn highLevelLargeLine() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const payload = "x" ** 8192;
+    const server = try high.listen(.{ .port = 0, .read_buffer_size = 16 * 1024, .callbacks = .{ .on_line = struct {
+        fn echo(conn: *high.Connection, line: []const u8) void {
+            conn.send(line) catch return;
+            conn.send("\n") catch {};
+        }
+    }.echo } });
+    defer server.close();
+    const client = try high.connect("127.0.0.1", server.address().getPort(), .{
+        .read_buffer_size = 16 * 1024,
+        .callbacks = .{ .on_line = hl.onClientLine },
+    });
+    defer client.close();
+    try client.send(payload ++ "\n");
+    if (!hl.pollUntil(struct {
+        fn f() bool {
+            return hl.client_got != null;
+        }
+    }.f)) return error.NoReply;
+    if (!std.mem.eql(u8, payload, hl.client_got.?)) return error.WrongReply;
+}
+
+fn highLevelLargeReadLine() !void {
+    const high = pumpkin.net;
+    const payload = "x" ** 8192;
+    const server = try high.listen(.{ .port = 0, .on_connect = struct {
+        fn greet(conn: *high.Connection) void {
+            conn.send(payload ++ "\n") catch {};
+        }
+    }.greet });
+    defer server.close();
+    const client = try high.connect("127.0.0.1", server.address().getPort(), .{ .read_buffer_size = payload.len + 1 });
+    defer client.close();
+    high.poll();
+    if (!std.mem.eql(u8, payload, try client.readLine())) return error.WrongGreeting;
+}
+
+fn highLevelLineLimit() !void {
+    hl.reset();
+    const high = pumpkin.net;
+    const server = try high.listen(.{ .port = 0, .read_buffer_size = 16, .callbacks = .{ .on_close = hl.onClose } });
+    defer server.close();
+    const client = try high.connect("127.0.0.1", server.address().getPort(), .{});
+    defer client.close();
+    try client.send("x" ** 16);
+    if (!hl.pollUntil(struct {
+        fn f() bool {
+            return hl.closes == 1;
+        }
+    }.f)) return error.NotClosed;
 }
 
 comptime {

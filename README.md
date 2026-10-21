@@ -12,10 +12,10 @@ This package provides Zig bindings for building Pumpkin plugins using WebAssembl
 Add a release of the package to your project:
 
 ```sh
-zig fetch --save git+https://github.com/Pumpkin-MC/pumpkin-api-zig#v0.1.1
+zig fetch --save git+https://github.com/Pumpkin-MC/pumpkin-api-zig#v0.2.0
 ```
 
-The [releases](https://github.com/Pumpkin-MC/pumpkin-api-zig/releases) list every version, and to update you run the command again with the new one. `main` is where development happens and follows the latest plugin API every day, so only use it if you need something that isn't released yet. If you are working on the API itself, point the dependency at a local checkout instead:
+The [releases](https://github.com/Pumpkin-MC/pumpkin-api-zig/releases) list every version, and to update you run the command again with the new one. `main` contains unreleased changes. If you are working on the API itself, point the dependency at a local checkout instead:
 
 ```zig
 .dependencies = .{
@@ -129,7 +129,7 @@ comptime {
 | [`hello`](examples/hello.zig) | Events, a command and styled text |
 | [`heal`](examples/heal.zig) | Command arguments read with `cmd.typed` |
 | [`menu`](examples/menu.zig) | Inventory menus with buttons, and a trash can with free slots |
-| [`config`](examples/config.zig) | A JSON config file in the plugin's data folder |
+| [`config`](examples/config.zig) | A TOML config file that can be reloaded |
 | [`dns`](examples/dns.zig) | Looking up the addresses of a host name |
 | [`http`](examples/http.zig) | A TCP connection with a timeout and a plain HTTP request |
 | [`https`](examples/https.zig) | HTTPS with `std.http.Client` |
@@ -192,7 +192,9 @@ fn buy(click: pumpkin.menu.Click) void {
 }
 ```
 
-Items can't be taken out of a menu or put into it. Buttons that share a handler can be told apart with `.data`. `on_close` runs when the menu is closed, when another menu replaces it, or when the player leaves.
+Slots are locked unless listed in `free`, which makes them work like chest slots. `fill` is optional and leaves free slots empty. `stacks` places existing item stacks in chosen slots, and `menu.items(player)` reads the contents, including inside `on_close`. See [`menu`](examples/menu.zig) for a trash can and [`vault`](examples/vault.zig) for storage with pages.
+
+Buttons that share a handler can be told apart with `.data`. `on_close` runs when the menu is closed, when another menu replaces it, or when the player leaves.
 
 The vault's **All pages** button shows each page's usage and the total capacity. `/vault <page>` opens a page directly. Its `config.toml` has `pages = 5`, configurable from 1 to 45 after a plugin restart. Lowering it keeps occupied higher pages accessible until they are emptied; existing vault files keep working.
 
@@ -204,7 +206,11 @@ Plugins are built for `wasm32-wasi`, so the usual `std.Io` file APIs work. The s
 | --- | --- |
 | `fs.read.data` | Read access to `plugins/data/<name>` |
 | `fs.write.data` | Read and write access to `plugins/data/<name>` |
-| `network.dns`, `http.outbound`, `sys.env` | DNS lookups, outgoing HTTP, environment variables |
+| `network.dns` | Looking up host names |
+| `network.tcp.connect` | Outgoing TCP connections, including HTTP and HTTPS |
+| `network.tcp.bind` | Listening for TCP connections |
+| `network.udp` | UDP sockets |
+| `sys.env` | Environment variables |
 
 With a data permission, the data folder is the current directory:
 

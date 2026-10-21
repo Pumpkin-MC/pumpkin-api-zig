@@ -1,5 +1,5 @@
 //! HTTP and HTTPS requests in a single call, built on `std.http.Client`.
-//! HTTPS trusts the certificates in `ca-certificates.crt` in the plugin's data
+//! HTTPS trusts the certificates in `ca_file`, relative to the plugin's data
 //! folder. A request blocks until the response arrives, so don't send them
 //! from events that fire every tick.
 //!
@@ -12,6 +12,10 @@ const pumpkin = @import("../pumpkin.zig");
 pub const Method = std.http.Method;
 pub const Status = std.http.Status;
 pub const Header = std.http.Header;
+
+/// The certificate bundle to load on the first HTTPS request. Call `deinit`
+/// before changing it after requests have been made.
+pub var ca_file: []const u8 = "ca-certificates.crt";
 
 pub const Options = struct {
     headers: []const Header = &.{},
@@ -107,10 +111,10 @@ fn loadCertificates(c: *std.http.Client) error{NoCertificates}!void {
     if (certificates_loaded) return;
     const io = pumpkin.io();
     const now = std.Io.Clock.real.now(io);
-    c.ca_bundle.addCertsFromFilePath(abi.heap, io, now, .cwd(), "ca-certificates.crt") catch |err| {
+    c.ca_bundle.addCertsFromFilePath(abi.heap, io, now, .cwd(), ca_file) catch |err| {
         std.log.err(
-            "HTTPS needs ca-certificates.crt in the plugin's data folder and the fs.read.data permission ({t})",
-            .{err},
+            "HTTPS can't load {s}; the plugin needs the certificate file and fs.read.data permission ({t})",
+            .{ ca_file, err },
         );
         return error.NoCertificates;
     };
