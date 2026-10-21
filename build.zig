@@ -103,6 +103,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
         });
     }
+    _ = addPluginFrom(b, b, .{
+        .name = "example-realm",
+        .root_source_file = b.path("examples/realm/main.zig"),
+    });
 
     const test_step = b.step("test", "Run unit tests");
     for ([_][]const u8{ "src/pumpkin.zig", "tools/gen.zig" }) |path| {
@@ -116,16 +120,18 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
-    const vault_api = b.createModule(.{ .root_source_file = b.path("src/pumpkin.zig"), .target = b.graph.host });
-    vault_api.addOptions("build_options", buildOptions(b));
-    const vault_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/vault.zig"),
-            .target = b.graph.host,
-            .imports = &.{.{ .name = "pumpkin", .module = vault_api }},
-        }),
-    });
-    test_step.dependOn(&b.addRunArtifact(vault_tests).step);
+    const example_api = b.createModule(.{ .root_source_file = b.path("src/pumpkin.zig"), .target = b.graph.host });
+    example_api.addOptions("build_options", buildOptions(b));
+    for ([_][]const u8{ "examples/vault.zig", "examples/realm/main.zig" }) |path| {
+        const example_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(path),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "pumpkin", .module = example_api }},
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(example_tests).step);
+    }
 
     const check = b.addObject(.{
         .name = "check",

@@ -140,6 +140,7 @@ comptime {
 | [`store`](examples/store.zig) | Data kept for every player in a file of its own |
 | [`prompt`](examples/prompt.zig) | Questions answered in chat and choices to click |
 | [`vault`](examples/vault.zig) | Personal storage with a page selector, usage indicators and configurable capacity |
+| [`realm`](examples/realm) | An economy built with every helper: shop, daily rewards, payments, cheques and coin rushes |
 | [`nettest`](examples/nettest.zig) | Runs every networking path with `/nettest` and reports each one |
 
 ## Commands
