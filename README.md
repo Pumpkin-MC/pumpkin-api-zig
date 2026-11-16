@@ -4,7 +4,7 @@ This package provides Zig bindings for building Pumpkin plugins using WebAssembl
 
 ## Requirements
 
-- [Zig](https://ziglang.org/download/) 0.16.0
+- [Zig](https://ziglang.org/download/) 0.17.1
 - [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) in your `PATH`
 
 ## Setup

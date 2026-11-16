@@ -232,15 +232,21 @@ pub fn Store(comptime T: type) type {
             const h = hash(text);
             if (h == entry.saved) return;
 
-            const io = runtime_io.current();
-            const cwd = std.Io.Dir.cwd();
             const path = try self.pathOf(abi.arena(), key, "");
             const temporary = try self.pathOf(abi.arena(), key, ".tmp");
-            errdefer |err| std.log.err("can't write {s} ({t}), the plugin needs the fs.write.data permission", .{ path, err });
+            self.replace(path, temporary, text) catch |err| {
+                std.log.err("can't write {s} ({t}), the plugin needs the fs.write.data permission", .{ path, err });
+                return err;
+            };
+            entry.saved = h;
+        }
+
+        fn replace(self: *const Self, path: []const u8, temporary: []const u8, text: []const u8) !void {
+            const io = runtime_io.current();
+            const cwd = std.Io.Dir.cwd();
             try cwd.createDirPath(io, self.dir);
             try cwd.writeFile(io, .{ .sub_path = temporary, .data = text });
             try std.Io.Dir.rename(cwd, temporary, cwd, path, io);
-            entry.saved = h;
         }
 
         fn pathOf(self: *const Self, gpa: std.mem.Allocator, key: []const u8, suffix: []const u8) ![]const u8 {

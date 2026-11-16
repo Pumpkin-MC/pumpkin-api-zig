@@ -709,25 +709,25 @@ fn isTable(comptime T: type) bool {
 }
 
 fn writeTable(w: *std.Io.Writer, value: anytype, path: []const u8) std.Io.Writer.Error!void {
-    const fields = @typeInfo(@TypeOf(value)).@"struct".fields;
-    inline for (fields) |field| {
-        if (comptime !isTable(field.type)) {
-            const v = @field(value, field.name);
-            const present = if (@typeInfo(field.type) == .optional) v != null else true;
+    const info = @typeInfo(@TypeOf(value)).@"struct";
+    inline for (info.field_names, info.field_types) |field, Field| {
+        if (comptime !isTable(Field)) {
+            const v = @field(value, field);
+            const present = if (@typeInfo(Field) == .optional) v != null else true;
             if (present) {
-                try writeKey(w, field.name);
+                try writeKey(w, field);
                 try w.writeAll(" = ");
                 try writeValue(w, v);
                 try w.writeByte('\n');
             }
         }
     }
-    inline for (fields) |field| {
-        if (comptime isTable(field.type)) {
-            if (@typeInfo(field.type) == .optional) {
-                if (@field(value, field.name)) |table| try writeNamedTable(w, table, path, field.name);
+    inline for (info.field_names, info.field_types) |field, Field| {
+        if (comptime isTable(Field)) {
+            if (@typeInfo(Field) == .optional) {
+                if (@field(value, field)) |table| try writeNamedTable(w, table, path, field);
             } else {
-                try writeNamedTable(w, @field(value, field.name), path, field.name);
+                try writeNamedTable(w, @field(value, field), path, field);
             }
         }
     }
@@ -776,13 +776,14 @@ fn writeValue(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
 fn writeInlineTable(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
     try w.writeByte('{');
     var first = true;
-    inline for (@typeInfo(@TypeOf(value)).@"struct".fields) |field| {
-        const v = @field(value, field.name);
-        const present = if (@typeInfo(field.type) == .optional) v != null else true;
+    const info = @typeInfo(@TypeOf(value)).@"struct";
+    inline for (info.field_names, info.field_types) |field, Field| {
+        const v = @field(value, field);
+        const present = if (@typeInfo(Field) == .optional) v != null else true;
         if (present) {
             try w.writeAll(if (first) " " else ", ");
             first = false;
-            try writeKey(w, field.name);
+            try writeKey(w, field);
             try w.writeAll(" = ");
             try writeValue(w, v);
         }

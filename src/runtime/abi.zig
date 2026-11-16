@@ -37,7 +37,7 @@ const Tracked = struct { handle: u32, drop: DropFn };
 var tracked: std.ArrayList(Tracked) = .empty;
 
 fn track(comptime T: type, handle: T) void {
-    tracked.append(backing, .{ .handle = @intFromEnum(handle), .drop = T.resource_drop }) catch @panic("OOM");
+    tracked.append(backing, .{ .handle = @backingInt(handle), .drop = T.resource_drop }) catch @panic("OOM");
 }
 
 fn untrack(comptime T: type, handle: T) void {
@@ -45,7 +45,7 @@ fn untrack(comptime T: type, handle: T) void {
     while (i > 0) {
         i -= 1;
         const item = tracked.items[i];
-        if (item.handle == @intFromEnum(handle) and item.drop == T.resource_drop) {
+        if (item.handle == @backingInt(handle) and item.drop == T.resource_drop) {
             _ = tracked.orderedRemove(i);
             for (frames.items) |*start| {
                 if (start.* > i) start.* -= 1;
@@ -63,7 +63,7 @@ pub fn keep(comptime T: type, handle: T) void {
 
 pub fn drop(comptime T: type, handle: T) void {
     untrack(T, handle);
-    T.resource_drop(@bitCast(@intFromEnum(handle)));
+    T.resource_drop(@bitCast(@backingInt(handle)));
 }
 
 /// A handle that is only lent to the callee. Plain handles are given away when lowered.
@@ -156,7 +156,7 @@ const max_flat_params = 16;
 const branch_quota = 10_000_000;
 
 fn isHandle(comptime T: type) bool {
-    return @typeInfo(T) == .@"enum" and !@typeInfo(T).@"enum".is_exhaustive;
+    return @typeInfo(T) == .@"enum" and @typeInfo(T).@"enum".mode == .nonexhaustive;
 }
 
 fn Discriminant(comptime cases: usize) type {
@@ -168,8 +168,8 @@ fn Discriminant(comptime cases: usize) type {
 fn caseCount(comptime T: type) comptime_int {
     return switch (@typeInfo(T)) {
         .optional => 2,
-        .@"union" => |u| u.fields.len,
-        .@"enum" => |e| e.fields.len,
+        .@"union" => |u| u.field_names.len,
+        .@"enum" => |e| e.field_names.len,
         else => unreachable,
     };
 }
@@ -194,15 +194,15 @@ pub fn alignOf(comptime T: type) comptime_int {
         .@"enum" => if (isHandle(T)) 4 else @sizeOf(Discriminant(caseCount(T))),
         .optional => |o| @max(1, alignOf(o.child)),
         .@"union" => |u| blk: {
-            var a = @sizeOf(Discriminant(u.fields.len));
-            for (u.fields) |f| a = @max(a, alignOf(f.type));
+            var a = @sizeOf(Discriminant(u.field_names.len));
+            for (u.field_types) |F| a = @max(a, alignOf(F));
             break :blk a;
         },
         .@"struct" => |s| blk: {
             if (s.layout == .@"packed") break :blk @sizeOf(s.backing_integer.?);
             if (isBorrowed(T)) break :blk 4;
             var a = 1;
-            for (s.fields) |f| a = @max(a, alignOf(f.type));
+            for (s.field_types) |F| a = @max(a, alignOf(F));
             break :blk a;
         },
         else => @compileError("no canonical ABI for " ++ @typeName(T)),
@@ -225,14 +225,14 @@ pub fn sizeOf(comptime T: type) comptime_int {
         .optional => |o| alignUp(payloadOffset(T) + sizeOf(o.child), alignOf(T)),
         .@"union" => |u| blk: {
             var max = 0;
-            for (u.fields) |f| max = @max(max, sizeOf(f.type));
+            for (u.field_types) |F| max = @max(max, sizeOf(F));
             break :blk alignUp(payloadOffset(T) + max, alignOf(T));
         },
         .@"struct" => |s| blk: {
             if (s.layout == .@"packed") break :blk @sizeOf(s.backing_integer.?);
             if (isBorrowed(T)) break :blk 4;
             var n = 0;
-            for (s.fields) |f| n = alignUp(n, alignOf(f.type)) + sizeOf(f.type);
+            for (s.field_types) |F| n = alignUp(n, alignOf(F)) + sizeOf(F);
             break :blk alignUp(n, alignOf(T));
         },
         else => @compileError("no canonical ABI for " ++ @typeName(T)),
@@ -253,10 +253,10 @@ fn payloadOffset(comptime T: type) comptime_int {
 fn fieldOffset(comptime T: type, comptime index: usize) comptime_int {
     @setEvalBranchQuota(branch_quota);
     var n = 0;
-    for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
-        n = alignUp(n, alignOf(f.type));
+    for (@typeInfo(T).@"struct".field_types, 0..) |F, i| {
+        n = alignUp(n, alignOf(F));
         if (i == index) return n;
-        n += sizeOf(f.type);
+        n += sizeOf(F);
     }
     unreachable;
 }
@@ -297,14 +297,12 @@ fn flattenType(comptime T: type) []const Core {
         .pointer => &.{ .i32, .i32 },
         .optional => |o| flattenCases(&.{ void, o.child }),
         .@"union" => |u| blk: {
-            var payloads: []const type = &.{};
-            for (u.fields) |f| payloads = payloads ++ [1]type{f.type};
-            break :blk flattenCases(payloads);
+            break :blk flattenCases(u.field_types);
         },
         .@"struct" => |s| blk: {
             if (s.layout == .@"packed" or isBorrowed(T)) break :blk &.{.i32};
             var out: []const Core = &.{};
-            for (s.fields) |f| out = out ++ flatten(f.type);
+            for (s.field_types) |F| out = out ++ flatten(F);
             break :blk out;
         },
         else => @compileError("no canonical ABI for " ++ @typeName(T)),
@@ -360,7 +358,7 @@ pub fn lowerFlat(comptime T: type, value: T, slots: []u64) void {
         .pointer => |p| lowerSlice(p.child, value, slots),
         .@"enum" => {
             if (comptime isHandle(T)) untrack(T, value);
-            slots[0] = @intFromEnum(value);
+            slots[0] = @backingInt(value);
         },
         .optional => |o| {
             @memset(slots[0..comptime flatten(T).len], 0);
@@ -373,8 +371,8 @@ pub fn lowerFlat(comptime T: type, value: T, slots: []u64) void {
             @memset(slots[0..comptime flatten(T).len], 0);
             switch (value) {
                 inline else => |v, tag| {
-                    slots[0] = @intFromEnum(tag);
-                    lowerFlat(u.fields[@intFromEnum(tag)].type, v, slots[1..]);
+                    slots[0] = @backingInt(tag);
+                    lowerFlat(u.field_types[@backingInt(tag)], v, slots[1..]);
                 },
             }
         },
@@ -384,13 +382,13 @@ pub fn lowerFlat(comptime T: type, value: T, slots: []u64) void {
                 return;
             }
             if (comptime isBorrowed(T)) {
-                slots[0] = @intFromEnum(value.handle);
+                slots[0] = @backingInt(value.handle);
                 return;
             }
             var at: usize = 0;
-            inline for (s.fields) |f| {
-                lowerFlat(f.type, @field(value, f.name), slots[at..]);
-                at += comptime flatten(f.type).len;
+            inline for (s.field_names, s.field_types) |name, F| {
+                lowerFlat(F, @field(value, name), slots[at..]);
+                at += comptime flatten(F).len;
             }
         },
         else => comptime unreachable,
@@ -413,14 +411,14 @@ pub fn liftFlat(comptime T: type, slots: []const u64) T {
         },
         .pointer => |p| return liftSlice(p.child, slots[0], slots[1]),
         .@"enum" => {
-            const value: T = @enumFromInt(slots[0]);
+            const value: T = @fromBackingInt(@intCast(slots[0]));
             if (comptime isHandle(T)) track(T, value);
             return value;
         },
         .optional => |o| return if (slots[0] == 0) null else liftFlat(o.child, slots[1..]),
         .@"union" => |u| {
-            inline for (u.fields, 0..) |f, i| {
-                if (slots[0] == i) return @unionInit(T, f.name, liftFlat(f.type, slots[1..]));
+            inline for (u.field_names, u.field_types, 0..) |name, F, i| {
+                if (slots[0] == i) return @unionInit(T, name, liftFlat(F, slots[1..]));
             }
             unreachable;
         },
@@ -429,9 +427,9 @@ pub fn liftFlat(comptime T: type, slots: []const u64) T {
             if (comptime isBorrowed(T)) @compileError("borrowed handles can only be passed to imports");
             var out: T = undefined;
             var at: usize = 0;
-            inline for (s.fields) |f| {
-                @field(out, f.name) = liftFlat(f.type, slots[at..]);
-                at += comptime flatten(f.type).len;
+            inline for (s.field_names, s.field_types) |name, F| {
+                @field(out, name) = liftFlat(F, slots[at..]);
+                at += comptime flatten(F).len;
             }
             return out;
         },
@@ -444,7 +442,7 @@ pub fn liftFlat(comptime T: type, slots: []const u64) T {
 // in code for all the others.
 
 pub fn loadTag(comptime U: type, ptr: [*]const u8) std.meta.Tag(U) {
-    return @enumFromInt(get(Discriminant(caseCount(U)), ptr));
+    return @fromBackingInt(@intCast(get(Discriminant(caseCount(U)), ptr)));
 }
 
 pub fn loadCase(comptime U: type, comptime tag: std.meta.Tag(U), ptr: [*]const u8) @FieldType(U, @tagName(tag)) {
@@ -452,7 +450,7 @@ pub fn loadCase(comptime U: type, comptime tag: std.meta.Tag(U), ptr: [*]const u
 }
 
 pub fn storeCase(comptime U: type, comptime tag: std.meta.Tag(U), value: @FieldType(U, @tagName(tag)), ptr: [*]u8) void {
-    put(Discriminant(caseCount(U)), ptr, @intFromEnum(tag));
+    put(Discriminant(caseCount(U)), ptr, @backingInt(tag));
     store(@FieldType(U, @tagName(tag)), value, ptr + payloadOffset(U));
 }
 
@@ -483,7 +481,7 @@ pub fn store(comptime T: type, value: T, ptr: [*]u8) void {
         .void => {},
         .bool => ptr[0] = @intFromBool(value),
         .int => |i| if (i.bits == 21) put(u32, ptr, value) else put(T, ptr, value),
-        .float => |f| put(std.meta.Int(.unsigned, f.bits), ptr, @bitCast(value)),
+        .float => |f| put(@Int(.unsigned, f.bits), ptr, @bitCast(value)),
         .pointer => |p| {
             var slots: [2]u64 = undefined;
             lowerSlice(p.child, value, &slots);
@@ -493,9 +491,9 @@ pub fn store(comptime T: type, value: T, ptr: [*]u8) void {
         .@"enum" => {
             if (comptime isHandle(T)) {
                 untrack(T, value);
-                return put(u32, ptr, @intFromEnum(value));
+                return put(u32, ptr, @backingInt(value));
             }
-            put(Discriminant(caseCount(T)), ptr, @intFromEnum(value));
+            put(Discriminant(caseCount(T)), ptr, @backingInt(value));
         },
         .optional => |o| {
             ptr[0] = @intFromBool(value != null);
@@ -503,15 +501,15 @@ pub fn store(comptime T: type, value: T, ptr: [*]u8) void {
         },
         .@"union" => |u| switch (value) {
             inline else => |v, tag| {
-                put(Discriminant(u.fields.len), ptr, @intFromEnum(tag));
-                store(u.fields[@intFromEnum(tag)].type, v, ptr + payloadOffset(T));
+                put(Discriminant(u.field_names.len), ptr, @backingInt(tag));
+                store(u.field_types[@backingInt(tag)], v, ptr + payloadOffset(T));
             },
         },
         .@"struct" => |s| {
             if (s.layout == .@"packed") return put(s.backing_integer.?, ptr, @bitCast(value));
-            if (comptime isBorrowed(T)) return put(u32, ptr, @intFromEnum(value.handle));
-            inline for (s.fields, 0..) |f, i| {
-                store(f.type, @field(value, f.name), ptr + fieldOffset(T, i));
+            if (comptime isBorrowed(T)) return put(u32, ptr, @backingInt(value.handle));
+            inline for (s.field_names, s.field_types, 0..) |name, F, i| {
+                store(F, @field(value, name), ptr + fieldOffset(T, i));
             }
         },
         else => comptime unreachable,
@@ -523,29 +521,29 @@ pub fn load(comptime T: type, ptr: [*]const u8) T {
         .void => return {},
         .bool => return ptr[0] != 0,
         .int => |i| return if (i.bits == 21) @truncate(get(u32, ptr)) else get(T, ptr),
-        .float => |f| return @bitCast(get(std.meta.Int(.unsigned, f.bits), ptr)),
+        .float => |f| return @bitCast(get(@Int(.unsigned, f.bits), ptr)),
         .pointer => |p| return liftSlice(p.child, get(u32, ptr), get(u32, ptr + 4)),
         .@"enum" => {
             if (comptime isHandle(T)) {
-                const value: T = @enumFromInt(get(u32, ptr));
+                const value: T = @fromBackingInt(@intCast(get(u32, ptr)));
                 track(T, value);
                 return value;
             }
-            return @enumFromInt(get(Discriminant(caseCount(T)), ptr));
+            return @fromBackingInt(@intCast(get(Discriminant(caseCount(T)), ptr)));
         },
         .optional => |o| return if (ptr[0] == 0) null else load(o.child, ptr + payloadOffset(T)),
         .@"union" => |u| {
-            const tag = get(Discriminant(u.fields.len), ptr);
-            inline for (u.fields, 0..) |f, i| {
-                if (tag == i) return @unionInit(T, f.name, load(f.type, ptr + payloadOffset(T)));
+            const tag = get(Discriminant(u.field_names.len), ptr);
+            inline for (u.field_names, u.field_types, 0..) |name, F, i| {
+                if (tag == i) return @unionInit(T, name, load(F, ptr + payloadOffset(T)));
             }
             unreachable;
         },
         .@"struct" => |s| {
             if (s.layout == .@"packed") return @bitCast(get(s.backing_integer.?, ptr));
             var out: T = undefined;
-            inline for (s.fields, 0..) |f, i| {
-                @field(out, f.name) = load(f.type, ptr + fieldOffset(T, i));
+            inline for (s.field_names, s.field_types, 0..) |name, F, i| {
+                @field(out, name) = load(F, ptr + fieldOffset(T, i));
             }
             return out;
         },
@@ -587,9 +585,9 @@ fn checkSignature(comptime Func: type, comptime Args: type, comptime Ret: type) 
     if (ret.len > 1) expected = expected ++ [1]Core{.i32};
     const expected_ret = if (ret.len == 1) CoreType(ret[0]) else void;
 
-    var ok = info.params.len == expected.len and info.return_type.? == expected_ret;
-    if (ok) for (info.params, expected) |p, e| {
-        if (p.type.? != CoreType(e)) ok = false;
+    var ok = info.param_types.len == expected.len and info.return_type.? == expected_ret;
+    if (ok) for (info.param_types, expected) |P, e| {
+        if (P.? != CoreType(e)) ok = false;
     };
     if (!ok) @compileError("raw signature " ++ @typeName(Func) ++ " does not match " ++ @typeName(Args) ++ " -> " ++ @typeName(Ret));
 }

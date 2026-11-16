@@ -152,7 +152,7 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
         }),
     });
-    const fmt = b.addFmt(.{ .paths = &.{"src/bindings"} });
+    const fmt = b.addFmt(.{ .paths = &.{b.path("src/bindings")} });
 
     const wasi_license = b.addUpdateSourceFiles();
     wasi_license.addCopyFileToSource(b.path("wasi/LICENSE.md"), "src/bindings/wasi/LICENSE.md");

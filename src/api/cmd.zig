@@ -195,26 +195,27 @@ pub fn defaultBadArgument(_: Sender, name: []const u8, problem: Problem) Result 
 
 /// Wraps `fn (Sender, Server, T) Result`, filling `T` with the arguments of the same name.
 pub fn typed(comptime handler: anytype) *const Handler {
-    const params = @typeInfo(@TypeOf(handler)).@"fn".params;
+    const params = @typeInfo(@TypeOf(handler)).@"fn".param_types;
     if (params.len != 3) @compileError("cmd.typed wants a fn (Sender, Server, T) Result");
-    const T = params[2].type.?;
+    const T = params[2].?;
     return &struct {
         fn run(sender: Sender, srv: Server, args: Args) Result {
             var out: T = undefined;
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const Value = switch (@typeInfo(field.type)) {
+            const info = @typeInfo(T).@"struct";
+            inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
+                const Value = switch (@typeInfo(Field)) {
                     .optional => |o| o.child,
-                    else => field.type,
+                    else => Field,
                 };
-                @field(out, field.name) = switch (read(Value, args.getValue(field.name))) {
+                @field(out, name) = switch (read(Value, args.getValue(name))) {
                     .ok => |value| value,
-                    .missing => if (field.defaultValue()) |default|
+                    .missing => if (attrs.defaultValue(Field)) |default|
                         default
-                    else if (Value != field.type)
+                    else if (Value != Field)
                         null
                     else
-                        return bad_argument(sender, field.name, .missing),
-                    .invalid => |problem| return bad_argument(sender, field.name, problem),
+                        return bad_argument(sender, name, .missing),
+                    .invalid => |problem| return bad_argument(sender, name, problem),
                 };
             }
             return handler(sender, srv, out);
@@ -254,8 +255,9 @@ fn read(comptime T: type, arg: Arg) Read(T) {
     if (T == Player and arg == .players) {
         return if (arg.players.len == 1) .{ .ok = arg.players[0] } else .{ .invalid = .not_one_player };
     }
-    inline for (@typeInfo(Arg).@"union".fields) |case| {
-        if (case.type == T and arg == @field(std.meta.Tag(Arg), case.name)) return .{ .ok = @field(arg, case.name) };
+    const cases = @typeInfo(Arg).@"union";
+    inline for (cases.field_names, cases.field_types) |name, Case| {
+        if (Case == T and arg == @field(std.meta.Tag(Arg), name)) return .{ .ok = @field(arg, name) };
     }
     return .missing;
 }
@@ -266,8 +268,8 @@ fn readable(comptime T: type) bool {
         .int, .float => return true,
         else => {},
     }
-    for (@typeInfo(Arg).@"union".fields) |case| {
-        if (case.type == T) return true;
+    for (@typeInfo(Arg).@"union".field_types) |Case| {
+        if (Case == T) return true;
     }
     return false;
 }
@@ -297,7 +299,7 @@ test "read" {
     const word = read([]const u8, .{ .msg = "hello there" });
     try std.testing.expectEqualStrings("hello there", word.ok);
 
-    const one: Player = @enumFromInt(7);
+    const one: Player = @fromBackingInt(@intCast(7));
     try std.testing.expectEqualDeep(Read(Player){ .ok = one }, read(Player, .{ .players = &.{one} }));
     try std.testing.expectEqualDeep(Read(Player){ .invalid = .not_one_player }, read(Player, .{ .players = &.{ one, one } }));
     try std.testing.expectEqualDeep(1, read([]const Player, .{ .players = &.{one} }).ok.len);

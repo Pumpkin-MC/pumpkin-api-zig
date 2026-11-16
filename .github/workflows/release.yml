@@ -20,7 +20,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.1
 
       - name: Set up wasm-tools
         uses: bytecodealliance/actions/wasm-tools/setup@v1

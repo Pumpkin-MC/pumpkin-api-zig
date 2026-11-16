@@ -133,25 +133,25 @@ pub fn File(comptime T: type) type {
         /// well, and returns whether `tree` is missing any setting of `S`.
         fn checkKeys(self: *const Self, comptime S: type, tree: std.json.Value, prefix: []const u8) bool {
             if (tree != .object) return false;
-            const fields = @typeInfo(S).@"struct".fields;
+            const info = @typeInfo(S).@"struct";
             var missing = false;
-            inline for (fields) |field| {
-                const name = if (prefix.len == 0) field.name else std.fmt.allocPrint(abi.arena(), "{s}.{s}", .{ prefix, field.name }) catch field.name;
-                if (tree.object.get(field.name)) |child| {
-                    const Child = switch (@typeInfo(field.type)) {
+            inline for (info.field_names, info.field_types) |field, Field| {
+                const name = if (prefix.len == 0) field else std.fmt.allocPrint(abi.arena(), "{s}.{s}", .{ prefix, field }) catch field;
+                if (tree.object.get(field)) |child| {
+                    const Child = switch (@typeInfo(Field)) {
                         .optional => |o| o.child,
-                        else => field.type,
+                        else => Field,
                     };
                     if (@typeInfo(Child) == .@"struct") {
                         if (self.checkKeys(Child, child, name)) missing = true;
                     }
-                } else if (@typeInfo(field.type) != .optional) {
+                } else if (@typeInfo(Field) != .optional) {
                     missing = true;
                 }
             }
             for (tree.object.keys()) |key| {
-                const known = inline for (fields) |field| {
-                    if (std.mem.eql(u8, field.name, key)) break true;
+                const known = inline for (info.field_names) |field| {
+                    if (std.mem.eql(u8, field, key)) break true;
                 } else false;
                 if (!known and self.report_unknown) {
                     if (prefix.len == 0) {

@@ -125,7 +125,7 @@ fn schedule(delay: Duration, period: ?Duration, comptime handler: anytype, data:
 }
 
 fn Glue(comptime T: type, comptime handler: anytype) type {
-    const params = @typeInfo(@TypeOf(handler)).@"fn".params.len;
+    const params = @typeInfo(@TypeOf(handler)).@"fn".param_types.len;
     if (params < 1 or params > 3) @compileError("a task handler takes (Server), (Server, T) or (Server, *T, Task)");
 
     return struct {

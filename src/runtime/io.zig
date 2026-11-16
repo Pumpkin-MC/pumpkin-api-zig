@@ -63,9 +63,6 @@ fn install(vtable: *Io.VTable) void {
     vtable.netListenIp = listenIp;
     vtable.netAccept = accept;
     vtable.netBindIp = bindIp;
-    vtable.netSend = send;
-    vtable.netRead = read;
-    vtable.netWrite = write;
     vtable.netClose = close;
     vtable.netShutdown = shutdown;
     vtable.netLookup = lookup;
@@ -457,12 +454,12 @@ fn bindIp(_: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.
     };
 }
 
-fn send(_: ?*anyopaque, handle: net.Socket.Handle, messages: []net.OutgoingMessage, _: net.SendFlags) struct { ?net.Socket.SendError, usize } {
-    const outgoing = switch (get(handle) orelse return .{ error.SocketUnconnected, 0 }) {
+fn send(op: Io.Operation.NetSend) Io.Operation.NetSend.Result {
+    const outgoing = switch (get(op.socket_handle) orelse return .{ error.SocketUnconnected, 0 }) {
         .datagram => |d| d.outgoing,
         else => return .{ error.SocketUnconnected, 0 },
     };
-    for (messages, 0..) |*message, i| {
+    for (op.messages, 0..) |*message, i| {
         while (true) {
             switch (outgoing.checkSend()) {
                 .ok => |permits| if (permits > 0) break else wait(outgoing.subscribe()),
@@ -487,12 +484,17 @@ fn send(_: ?*anyopaque, handle: net.Socket.Handle, messages: []net.OutgoingMessa
             }, i },
         }
     }
-    return .{ null, messages.len };
+    return .{ null, op.messages.len };
 }
 
 fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
-    if (operation != .net_receive) return fallback_operate(userdata, operation);
-    return .{ .net_receive = receive(operation.net_receive) };
+    return switch (operation) {
+        .net_receive => |op| .{ .net_receive = receive(op) },
+        .net_send => |op| .{ .net_send = send(op) },
+        .net_read => |op| .{ .net_read = read(op) },
+        .net_write => |op| .{ .net_write = write(op) },
+        else => fallback_operate(userdata, operation),
+    };
 }
 
 fn receive(op: Io.Operation.NetReceive) Io.Operation.NetReceive.Result {
@@ -536,8 +538,9 @@ fn receive(op: Io.Operation.NetReceive) Io.Operation.NetReceive.Result {
     return .{ null, datagrams.len };
 }
 
-fn read(_: ?*anyopaque, handle: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
-    const stream = switch ((entryOf(handle) orelse return error.SocketUnconnected).*) {
+fn read(op: Io.Operation.NetRead) Io.Operation.NetRead.Result {
+    const data = op.data;
+    const stream = switch ((entryOf(op.socket_handle) orelse return error.SocketUnconnected).*) {
         .stream => |*s| s,
         else => return error.SocketUnconnected,
     };
@@ -547,22 +550,22 @@ fn read(_: ?*anyopaque, handle: net.Socket.Handle, data: [][]u8) net.Stream.Read
     if (stream.pending.items.len > 0) {
         const n = copyInto(data, stream.pending.items);
         stream.pending.replaceRangeAssumeCapacity(0, n, &.{});
-        return n;
+        return .{ .data_len = n };
     }
     if (stream.failed) return error.ConnectionResetByPeer;
-    if (stream.ended) return 0;
+    if (stream.ended) return .{ .data_len = 0 };
 
     const bytes = switch (stream.input.blockingRead(len)) {
         .ok => |bytes| bytes,
         .err => |err| switch (err) {
-            .closed => return 0,
+            .closed => return .{ .data_len = 0 },
             .last_operation_failed => |e| {
                 e.deinit();
                 return error.ConnectionResetByPeer;
             },
         },
     };
-    return copyInto(data, bytes);
+    return .{ .data_len = copyInto(data, bytes) };
 }
 
 fn copyInto(data: [][]u8, bytes: []const u8) usize {
@@ -581,18 +584,19 @@ fn fill(buffer: []u8, len: usize, bytes: []const u8) usize {
     return len + n;
 }
 
-fn write(_: ?*anyopaque, handle: net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) net.Stream.Writer.Error!usize {
-    const output = switch (get(handle) orelse return error.SocketUnconnected) {
+fn write(op: Io.Operation.NetWrite) Io.Operation.NetWrite.Result {
+    const data = op.data;
+    const output = switch (get(op.socket_handle) orelse return error.SocketUnconnected) {
         .stream => |s| s.output,
         else => return error.SocketUnconnected,
     };
 
     // `blocking-write-and-flush` accepts at most 4096 bytes per call.
     var buffer: [4096]u8 = undefined;
-    var len = fill(&buffer, 0, header);
+    var len = fill(&buffer, 0, op.header);
     for (data[0 .. data.len - 1]) |bytes| len = fill(&buffer, len, bytes);
     const pattern = data[data.len - 1];
-    for (0..splat) |_| {
+    for (0..op.splat) |_| {
         if (len == buffer.len or pattern.len == 0) break;
         len = fill(&buffer, len, pattern);
     }
@@ -610,8 +614,9 @@ fn write(_: ?*anyopaque, handle: net.Socket.Handle, header: []const u8, data: []
     }
 }
 
-fn close(_: ?*anyopaque, handles: []const net.Socket.Handle) void {
-    for (handles) |handle| {
+fn close(_: ?*anyopaque, sockets: []const net.Socket) void {
+    for (sockets) |socket| {
+        const handle = socket.handle;
         const entry = get(handle) orelse continue;
         entries.items[@intCast(handle - first_handle)] = null;
         switch (entry) {

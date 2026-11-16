@@ -85,5 +85,5 @@ fn notify(text: []const u8) void {
         std.log.warn("the webhook failed ({t}), it needs the network.dns and network.tcp.connect permissions", .{err});
         return;
     };
-    if (!res.ok()) std.log.warn("the webhook answered {d}", .{@intFromEnum(res.status)});
+    if (!res.ok()) std.log.warn("the webhook answered {d}", .{@backingInt(res.status)});
 }

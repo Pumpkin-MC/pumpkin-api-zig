@@ -197,10 +197,10 @@ pub fn runEvery(comptime handler: TaskHandler, delay_ticks: u64, period_ticks: u
 /// or `.event_name = .{ handler, EventOptions{...} }`.
 fn registerEvents(comptime Plugin: type, ctx: Context) void {
     const table = Plugin.events;
-    inline for (@typeInfo(@TypeOf(table)).@"struct".fields) |field| {
-        if (!@hasField(EventType, field.name)) @compileError("no event called '" ++ field.name ++ "'");
-        const event_type = @field(EventType, field.name);
-        const entry = @field(table, field.name);
+    inline for (@typeInfo(@TypeOf(table)).@"struct".field_names) |name| {
+        if (!@hasField(EventType, name)) @compileError("no event called '" ++ name ++ "'");
+        const event_type = @field(EventType, name);
+        const entry = @field(table, name);
         if (@typeInfo(@TypeOf(entry)) == .@"fn") {
             on(ctx, event_type, entry, .{});
         } else {

@@ -169,7 +169,7 @@ pub fn edit(stack: ItemStack, changes: Edit) void {
     if (changes.glint) |on| {
         if (on) setComponent(stack, .enchantment_glint_override, .{true}) else stack.removeComponent(.enchantment_glint_override);
     }
-    if (changes.rarity) |r| setComponent(stack, .rarity, .{varInt(@intFromEnum(r))});
+    if (changes.rarity) |r| setComponent(stack, .rarity, .{varInt(@backingInt(r))});
     if (changes.max_stack_size) |n| setComponent(stack, .max_stack_size, .{varInt(n)});
     if (changes.max_damage) |n| setComponent(stack, .max_damage, .{varInt(n)});
     if (changes.damage) |n| {

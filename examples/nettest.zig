@@ -466,7 +466,7 @@ fn highLevelReadTimeout() !void {
 fn highLevelLargeLine() !void {
     hl.reset();
     const high = pumpkin.net;
-    const payload = "x" ** 8192;
+    const payload = &@as([8192]u8, @splat('x'));
     const server = try high.listen(.{ .port = 0, .read_buffer_size = 16 * 1024, .callbacks = .{ .on_line = struct {
         fn echo(conn: *high.Connection, line: []const u8) void {
             conn.send(line) catch return;
@@ -490,7 +490,7 @@ fn highLevelLargeLine() !void {
 
 fn highLevelLargeReadLine() !void {
     const high = pumpkin.net;
-    const payload = "x" ** 8192;
+    const payload = &@as([8192]u8, @splat('x'));
     const server = try high.listen(.{ .port = 0, .on_connect = struct {
         fn greet(conn: *high.Connection) void {
             conn.send(payload ++ "\n") catch {};
@@ -510,7 +510,7 @@ fn highLevelLineLimit() !void {
     defer server.close();
     const client = try high.connect("127.0.0.1", server.address().getPort(), .{});
     defer client.close();
-    try client.send("x" ** 16);
+    try client.send(&@as([16]u8, @splat('x')));
     if (!hl.pollUntil(struct {
         fn f() bool {
             return hl.closes == 1;

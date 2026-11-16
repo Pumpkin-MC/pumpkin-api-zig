@@ -4,7 +4,7 @@ Thanks for helping out. This guide covers how to set up the repository, how it i
 
 ## Setup
 
-You need [Zig](https://ziglang.org/download/) 0.16.0 and [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) 1.259.0 in your `PATH`. The Pumpkin bindings are generated from the `wit` submodule, so clone with it:
+You need [Zig](https://ziglang.org/download/) 0.17.1 and [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) 1.259.0 in your `PATH`. The Pumpkin bindings are generated from the `wit` submodule, so clone with it:
 
 ```sh
 git clone --recurse-submodules https://github.com/Pumpkin-MC/pumpkin-api-zig

@@ -71,12 +71,12 @@ const Https = struct {
     fn show(sender: cmd.Sender, result: http.Error!http.Response) cmd.Result {
         const res = result catch |err| return cmd.fail(@errorName(err));
         sender.sendMessage(msg.fmt(if (res.ok()) .green else .red, "{d} {s}, {d} bytes", .{
-            @intFromEnum(res.status),
+            @backingInt(res.status),
             res.status.phrase() orelse "",
             res.body.len,
         }));
         if (res.body.len > 0) sender.sendMessage(msg.fmt(.gray, "{s}", .{res.body[0..@min(res.body.len, 256)]}));
-        return cmd.ok(@intFromEnum(res.status));
+        return cmd.ok(@backingInt(res.status));
     }
 };
 

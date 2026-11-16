@@ -8,16 +8,16 @@ const wasi = @import("bindings/wasi.zig");
 
 fn collect(comptime T: type) []const *const anyopaque {
     var out: []const *const anyopaque = &.{};
-    for (std.meta.declarations(T)) |decl| {
-        const Decl = @TypeOf(@field(T, decl.name));
+    for (std.meta.declarations(T)) |name| {
+        const Decl = @TypeOf(@field(T, name));
         if (Decl == type) {
-            const Inner = @field(T, decl.name);
+            const Inner = @field(T, name);
             switch (@typeInfo(Inner)) {
                 .@"struct", .@"enum", .@"union" => out = out ++ collect(Inner),
                 else => {},
             }
         } else if (@typeInfo(Decl) == .@"fn" and !@typeInfo(Decl).@"fn".is_generic) {
-            out = out ++ [1]*const anyopaque{@ptrCast(&@field(T, decl.name))};
+            out = out ++ [1]*const anyopaque{@ptrCast(&@field(T, name))};
         }
     }
     return out;
